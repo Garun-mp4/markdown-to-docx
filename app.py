@@ -16,9 +16,15 @@ from converter import (
     collect_project,
     prepare_images,
 )
-from docx_profile import ProfileValidationError, default_profile, validate_profile
+from docx_profile import (
+    ProfileValidationError,
+    default_profile,
+    profile_presets,
+    validate_profile,
+)
 
 MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+MAX_PROFILE_CONFIG_BYTES = 1024 * 1024
 
 app = Flask(__name__)
 app.config.update(
@@ -41,12 +47,43 @@ def _total_uploaded_file_bytes(uploads) -> int:
 
 @app.get("/")
 def index():
-    return render_template("index.html", default_profile=default_profile())
+    return render_template(
+        "index.html",
+        default_profile=default_profile(),
+        profile_presets=profile_presets(),
+    )
 
 
 @app.get("/favicon.ico")
 def favicon():
     return "", 204
+
+
+@app.post("/api/profile/validate")
+def validate_profile_api():
+    if request.content_length is not None and request.content_length > MAX_PROFILE_CONFIG_BYTES:
+        return jsonify(error="Файл конфигурации не должен превышать 1 МБ.", field="profile"), 413
+
+    raw_payload = request.stream.read(MAX_PROFILE_CONFIG_BYTES + 1)
+    if len(raw_payload) > MAX_PROFILE_CONFIG_BYTES:
+        return jsonify(error="Файл конфигурации не должен превышать 1 МБ.", field="profile"), 413
+
+    try:
+        payload = json.loads(raw_payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return jsonify(error="Файл конфигурации должен содержать корректный JSON в кодировке UTF-8.", field="profile"), 400
+
+    if not isinstance(payload, dict) or set(payload) != {"profile"}:
+        return jsonify(error="Передайте объект профиля в поле profile.", field="profile"), 400
+    if not isinstance(payload["profile"], dict):
+        return jsonify(error="Параметр profile должен быть объектом настроек.", field="profile"), 400
+
+    try:
+        profile = validate_profile(payload["profile"])
+    except ProfileValidationError as exc:
+        return jsonify(error=str(exc), field="profile"), 400
+
+    return jsonify(profile=profile)
 
 
 @app.post("/api/convert")

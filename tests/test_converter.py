@@ -31,7 +31,12 @@ from converter import (
     collect_project,
     prepare_images,
 )
-from docx_profile import ProfileValidationError, default_profile, validate_profile
+from docx_profile import (
+    ProfileValidationError,
+    default_profile,
+    profile_presets,
+    validate_profile,
+)
 
 
 def png_bytes(color=(20, 50, 90)):
@@ -288,6 +293,90 @@ def test_profile_validation_rejects_out_of_range_and_unknown_values():
     profile["tables"]["vertical_alignment"] = "justify"
     with pytest.raises(ProfileValidationError, match="вертикальное выравнивание"):
         validate_profile(profile)
+
+
+def test_builtin_profile_presets_are_valid_and_have_expected_body_styles():
+    presets = profile_presets()
+
+    assert [preset["id"] for preset in presets] == ["academic", "compact", "business"]
+    assert [preset["name"] for preset in presets] == ["Академический", "Компактный", "Деловой"]
+    assert all(validate_profile(preset["profile"]) == preset["profile"] for preset in presets)
+    assert presets[0]["profile"] == default_profile()
+    assert presets[1]["profile"]["body"]["font_family"] == "Times New Roman"
+    assert presets[1]["profile"]["body"]["font_size_pt"] == 11
+    assert presets[1]["profile"]["body"]["line_spacing"] == 1.15
+    assert presets[2]["profile"]["body"]["font_family"] == "Arial"
+    assert presets[2]["profile"]["body"]["font_size_pt"] == 11
+    assert presets[2]["profile"]["body"]["line_spacing"] == 1.15
+    assert presets[2]["profile"]["body"]["first_line_indent_mm"] == 0
+
+
+@pytest.mark.parametrize(
+    ("preset_id", "font_family", "font_size", "line_spacing", "first_line_indent_mm"),
+    [
+        ("academic", "Times New Roman", 12, 1.5, 12.5),
+        ("compact", "Times New Roman", 11, 1.15, 12.5),
+        ("business", "Arial", 11, 1.15, 0),
+    ],
+)
+def test_builtin_profile_presets_apply_to_generated_docx(
+    preset_id, font_family, font_size, line_spacing, first_line_indent_mm
+):
+    preset = next(item for item in profile_presets() if item["id"] == preset_id)
+    document = Document(io.BytesIO(build_docx(
+        "Preset text",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+        profile=preset["profile"],
+    )))
+
+    normal = document.styles["Normal"]
+    assert normal.font.name == font_family
+    assert normal.font.size == Pt(font_size)
+    assert normal.paragraph_format.line_spacing == line_spacing
+    assert abs(normal.paragraph_format.first_line_indent - Mm(first_line_indent_mm)) < 500
+
+
+def test_profile_validation_api_returns_normalized_profile():
+    response = app.test_client().post("/api/profile/validate", json={"profile": default_profile()})
+
+    assert response.status_code == 200
+    assert response.json == {"profile": default_profile()}
+
+
+def test_profile_validation_api_rejects_invalid_profile():
+    profile = default_profile()
+    profile["page"].update(width_mm=100, left_margin_mm=50, right_margin_mm=30)
+
+    response = app.test_client().post("/api/profile/validate", json={"profile": profile})
+
+    assert response.status_code == 400
+    assert response.json["field"] == "profile"
+    assert "не менее 30 мм" in response.json["error"]
+
+
+def test_profile_validation_api_rejects_invalid_json_and_oversized_body():
+    client = app.test_client()
+
+    malformed = client.post("/api/profile/validate", data="{", content_type="application/json")
+    oversized = client.post(
+        "/api/profile/validate",
+        data=b" " * (1024 * 1024 + 1),
+        content_type="application/json",
+    )
+
+    assert malformed.status_code == 400
+    assert oversized.status_code == 413
+
+
+def test_profile_validation_api_rejects_null_profile():
+    response = app.test_client().post("/api/profile/validate", json={"profile": None})
+
+    assert response.status_code == 400
+    assert "должен быть объектом" in response.json["error"]
 
 
 @pytest.mark.parametrize(

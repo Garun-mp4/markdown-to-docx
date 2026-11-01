@@ -21,18 +21,37 @@ const downloadLink = document.querySelector("#download-link");
 const resultFilename = document.querySelector("#result-filename");
 const profileControls = document.querySelector("#profile-controls");
 const profileError = document.querySelector("#profile-error");
+const profileEditorError = document.querySelector("#profile-editor-error");
+const profileSelect = document.querySelector("#active-profile");
+const profileSummary = document.querySelector("#profile-summary");
+const profileDialog = document.querySelector("#profile-dialog");
+const profileEditorForm = document.querySelector("#profile-editor-form");
+const profileEditorName = document.querySelector("#profile-name");
+const profileEditorTitle = document.querySelector("#profile-dialog-title");
+const saveProfileButton = document.querySelector("#save-profile");
+const importProfileButton = document.querySelector("#import-profile");
+const importProfileInput = document.querySelector("#profile-import-file");
 const numberingStartPage = document.querySelector("#numbering-start-page");
 const numberingMode = document.querySelector("#numbering-mode");
 const numberingControls = document.querySelector("#numbering-controls");
 const defaultProfile = JSON.parse(document.querySelector("#default-profile").textContent);
+const builtinProfiles = JSON.parse(document.querySelector("#profile-presets").textContent);
 const validImageExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"]);
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_TOTAL_UPLOAD_BYTES = 200 * 1024 * 1024;
+const MAX_PROFILE_CONFIG_BYTES = 1024 * 1024;
+const PROFILE_CONFIG_FORMAT = "markdown-to-docx-profile";
+const PROFILE_CONFIG_VERSION = 1;
+const PROFILE_STORAGE_KEY = "markdown-to-docx.profile-library.v1";
 
 let selectedSource = null;
 let selectedAssets = [];
 let downloadUrl = null;
 let isConverting = false;
+let customProfiles = [];
+let activeProfileId = "academic";
+let activeProfile = cloneProfile(defaultProfile);
+let editingProfileId = null;
 
 const profileLabels = {
   width_mm: "Ширина листа, мм",
@@ -225,18 +244,19 @@ function createProfileControl(path, value) {
   return wrapper;
 }
 
-function appendProfileFields(container, path) {
-  const object = getAtPath(defaultProfile, path);
+function appendProfileFields(container, path, profile) {
+  const schema = getAtPath(defaultProfile, path);
+  const object = getAtPath(profile, path);
   const fields = document.createElement("div");
   fields.className = "profile-fields";
-  const orderedKeys = profileFieldOrder[path] ?? Object.keys(object);
-  const keys = [...orderedKeys.filter((key) => key in object), ...Object.keys(object).filter((key) => !orderedKeys.includes(key))];
+  const orderedKeys = profileFieldOrder[path] ?? Object.keys(schema);
+  const keys = [...orderedKeys.filter((key) => key in schema), ...Object.keys(schema).filter((key) => !orderedKeys.includes(key))];
   for (const key of keys) {
     const value = object[key];
     const fieldPath = `${path}.${key}`;
-    if (value && typeof value === "object" && !Array.isArray(value)) {
+    if (schema[key] && typeof schema[key] === "object" && !Array.isArray(schema[key])) {
       const subgroup = createDetails(key === "table" ? "Подпись таблицы" : key === "figure" ? "Подпись рисунка" : key === "continuation" ? "Продолжение таблицы" : key, false, "profile-subgroup");
-      appendProfileFields(subgroup.content, fieldPath);
+      appendProfileFields(subgroup.content, fieldPath, profile);
       fields.append(subgroup.element);
     } else {
       fields.append(createProfileControl(fieldPath, value));
@@ -256,14 +276,14 @@ function createDetails(title, open = false, className = "profile-group") {
   return { element, content };
 }
 
-function renderProfile() {
+function renderProfile(profile = activeProfile) {
   profileControls.replaceChildren();
   for (const group of profileGroups) {
     const details = createDetails(group.title, Boolean(group.open));
-    if (group.path) appendProfileFields(details.content, group.path);
+    if (group.path) appendProfileFields(details.content, group.path, profile);
     for (const child of group.children ?? []) {
       const nested = createDetails(child.title, false, "profile-subgroup");
-      appendProfileFields(nested.content, child.path);
+      appendProfileFields(nested.content, child.path, profile);
       details.content.append(nested.element);
     }
     profileControls.append(details.element);
@@ -278,7 +298,7 @@ function renderProfile() {
   profileControls.append(familyList);
 }
 
-function readProfile() {
+function readProfileDraft() {
   const profile = JSON.parse(JSON.stringify(defaultProfile));
   for (const control of profileControls.querySelectorAll("[data-profile-path]")) {
     let value;
@@ -288,6 +308,344 @@ function readProfile() {
     setAtPath(profile, control.dataset.profilePath, value);
   }
   return profile;
+}
+
+function cloneProfile(profile) {
+  return JSON.parse(JSON.stringify(profile));
+}
+
+function getProfileRecord(id) {
+  return builtinProfiles.find((profile) => profile.id === id)
+    ?? customProfiles.find((profile) => profile.id === id)
+    ?? null;
+}
+
+function hasProfileShape(value, template) {
+  if (Array.isArray(template)) {
+    return Array.isArray(value) && value.length === template.length
+      && value.every((item, index) => hasProfileShape(item, template[index]));
+  }
+  if (template && typeof template === "object") {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      && Object.keys(value).length === Object.keys(template).length
+      && Object.keys(template).every((key) => key in value && hasProfileShape(value[key], template[key]));
+  }
+  if (typeof template === "number") return typeof value === "number" && Number.isFinite(value);
+  return typeof value === typeof template;
+}
+
+function validProfileName(value) {
+  return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 60
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function profileNameKey(name) {
+  return name.trim().toLocaleLowerCase("ru-RU");
+}
+
+function uniqueProfileName(name, profiles = customProfiles) {
+  const usedNames = new Set([
+    ...builtinProfiles.map((profile) => profile.name),
+    ...profiles.map((profile) => profile.name),
+  ].map(profileNameKey));
+  const baseName = name.trim().slice(0, 60);
+  if (!usedNames.has(profileNameKey(baseName))) return baseName;
+  for (let suffix = 2; suffix < 10000; suffix += 1) {
+    const suffixText = ` (${suffix})`;
+    const candidate = `${baseName.slice(0, 60 - suffixText.length)}${suffixText}`;
+    if (!usedNames.has(profileNameKey(candidate))) return candidate;
+  }
+  return `${baseName.slice(0, 45)} — ${Date.now()}`;
+}
+
+function profileStorageState(profiles, selectedId) {
+  return JSON.stringify({
+    version: PROFILE_CONFIG_VERSION,
+    activeProfileId: selectedId,
+    customProfiles: profiles,
+  });
+}
+
+function persistProfileState(profiles, selectedId) {
+  try {
+    localStorage.setItem(PROFILE_STORAGE_KEY, profileStorageState(profiles, selectedId));
+    return true;
+  } catch {
+    showProfileError("Не удалось сохранить профиль в этом браузере. Освободите место в хранилище и повторите попытку.");
+    return false;
+  }
+}
+
+function restoreProfileState() {
+  try {
+    const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (!saved || saved.version !== PROFILE_CONFIG_VERSION || !Array.isArray(saved.customProfiles)) {
+      throw new Error("Некорректная версия библиотеки профилей.");
+    }
+
+    const seenIds = new Set();
+    const seenNames = new Set(builtinProfiles.map((profile) => profileNameKey(profile.name)));
+    customProfiles = saved.customProfiles.filter((profile) => {
+      if (!profile || typeof profile.id !== "string" || !profile.id.startsWith("custom-")
+        || seenIds.has(profile.id) || !validProfileName(profile.name)
+        || !hasProfileShape(profile.profile, defaultProfile)) return false;
+      const nameKey = profileNameKey(profile.name);
+      if (seenNames.has(nameKey)) return false;
+      seenIds.add(profile.id);
+      seenNames.add(nameKey);
+      return true;
+    }).map((profile) => ({ ...profile, profile: cloneProfile(profile.profile) }));
+
+    if (customProfiles.length !== saved.customProfiles.length) {
+      showProfileError("Часть сохранённых профилей повреждена или дублируется; доступны встроенные и исправные профили.");
+    }
+    if (getProfileRecord(saved.activeProfileId)) activeProfileId = saved.activeProfileId;
+  } catch {
+    customProfiles = [];
+    activeProfileId = "academic";
+    showProfileError("Не удалось прочитать сохранённые профили. Можно импортировать JSON-конфигурацию заново.");
+  }
+}
+
+function profileSummaryText(profile) {
+  const page = profile.page.width_mm === 210 && profile.page.height_mm === 297
+    ? "A4"
+    : `${profile.page.width_mm} × ${profile.page.height_mm} мм`;
+  const spacing = Number(profile.body.line_spacing).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+  return `${page} · ${profile.body.font_family}, ${profile.body.font_size_pt} pt · интервал ${spacing}`;
+}
+
+function renderProfilePicker() {
+  const builtinOptions = document.querySelector("#builtin-profile-options");
+  const customOptions = document.querySelector("#custom-profile-options");
+  builtinOptions.replaceChildren();
+  customOptions.replaceChildren();
+  for (const profile of builtinProfiles) {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.name;
+    builtinOptions.append(option);
+  }
+  for (const profile of customProfiles) {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.name;
+    customOptions.append(option);
+  }
+  customOptions.hidden = customProfiles.length === 0;
+  const record = getProfileRecord(activeProfileId) ?? builtinProfiles[0];
+  activeProfileId = record.id;
+  activeProfile = cloneProfile(record.profile);
+  profileSelect.value = activeProfileId;
+  profileSummary.textContent = profileSummaryText(activeProfile);
+  document.querySelector("#export-profile").disabled = !record;
+}
+
+function showProfileError(message) {
+  profileError.textContent = message;
+  profileError.hidden = !message;
+}
+
+function showProfileEditorError(message) {
+  profileEditorError.textContent = message;
+  profileEditorError.hidden = !message;
+}
+
+function showUniqueProfileName(name) {
+  return uniqueProfileName(name);
+}
+
+function activateProfile(id, { persist = true, announce = true } = {}) {
+  const record = getProfileRecord(id);
+  if (!record) return;
+  activeProfileId = record.id;
+  activeProfile = cloneProfile(record.profile);
+  renderProfilePicker();
+  clearFieldError("profile");
+  if (persist) persistProfileState(customProfiles, activeProfileId);
+  invalidateResult();
+  if (announce) setFeedback(`Выбран профиль «${record.name}».`, "success");
+}
+
+function openProfileEditor({ create = false } = {}) {
+  const record = getProfileRecord(activeProfileId) ?? builtinProfiles[0];
+  const isCustom = record.id.startsWith("custom-");
+  editingProfileId = !create && isCustom ? record.id : null;
+  const draftProfile = cloneProfile(record.profile);
+  profileEditorName.value = editingProfileId
+    ? record.name
+    : showUniqueProfileName(`${record.name} — копия`);
+  profileEditorTitle.textContent = create ? "Создать профиль" : "Настроить профиль";
+  saveProfileButton.textContent = editingProfileId ? "Сохранить изменения" : "Сохранить копию";
+  showProfileEditorError("");
+  clearFieldError("profile");
+  renderProfile(draftProfile);
+  if (!profileDialog.open) profileDialog.showModal();
+  profileEditorName.focus({ preventScroll: true });
+}
+
+async function validateProfileOnServer(profile) {
+  const response = await fetch("/api/profile/validate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile }),
+  });
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("Сервер вернул некорректный ответ при проверке профиля.");
+  }
+  if (!response.ok) throw new Error(payload.error ?? "Не удалось проверить профиль.");
+  if (!payload.profile) throw new Error("Сервер не вернул проверенный профиль.");
+  return payload.profile;
+}
+
+function profileRequestError(error) {
+  if (error instanceof TypeError) return "Не удалось связаться с сервером для проверки профиля. Проверьте соединение и повторите попытку.";
+  return error.message || "Не удалось проверить конфигурацию профиля.";
+}
+
+async function saveProfileDraft(event) {
+  event.preventDefault();
+  showProfileEditorError("");
+  const invalidControl = firstInvalidProfileControl();
+  if (invalidControl) {
+    invalidControl.setAttribute("aria-invalid", "true");
+    invalidControl.focus();
+    showProfileEditorError("Проверьте отмеченные параметры оформления.");
+    return;
+  }
+
+  const name = profileEditorName.value.trim();
+  if (!validProfileName(name)) {
+    profileEditorName.setAttribute("aria-invalid", "true");
+    profileEditorName.focus();
+    showProfileEditorError("Название должно содержать от 1 до 60 символов без управляющих знаков.");
+    return;
+  }
+
+  const draftProfile = readProfileDraft();
+  saveProfileButton.disabled = true;
+  saveProfileButton.textContent = "Проверка…";
+  try {
+    const validatedProfile = await validateProfileOnServer(draftProfile);
+    const currentIndex = customProfiles.findIndex((profile) => profile.id === editingProfileId);
+    if (currentIndex >= 0) {
+      const nameExists = customProfiles.some((profile) => profile.id !== editingProfileId
+        && profileNameKey(profile.name) === profileNameKey(name));
+      const builtinNameExists = builtinProfiles.some((profile) => profileNameKey(profile.name) === profileNameKey(name));
+      if (nameExists || builtinNameExists) {
+        showProfileEditorError("Это название уже используется. Выберите другое.");
+        profileEditorName.focus();
+        return;
+      }
+    }
+
+    const profileId = editingProfileId ?? `custom-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+    const updatedProfile = { id: profileId, name, profile: validatedProfile };
+    const nextProfiles = [...customProfiles];
+    if (currentIndex >= 0) nextProfiles[currentIndex] = updatedProfile;
+    else nextProfiles.push(updatedProfile);
+    if (!persistProfileState(nextProfiles, profileId)) {
+      showProfileEditorError(profileError.textContent);
+      return;
+    }
+
+    customProfiles = nextProfiles;
+    activeProfileId = profileId;
+    activeProfile = cloneProfile(validatedProfile);
+    renderProfilePicker();
+    clearFieldError("profile");
+    profileDialog.close();
+    invalidateResult();
+    setFeedback(`Профиль «${name}» сохранён и выбран.`, "success");
+  } catch (error) {
+    showProfileEditorError(profileRequestError(error));
+  } finally {
+    saveProfileButton.disabled = false;
+    saveProfileButton.textContent = editingProfileId ? "Сохранить изменения" : "Сохранить копию";
+  }
+}
+
+async function importProfileFile(file) {
+  if (!file) return;
+  clearFieldError("profile");
+  if (!file.name.toLowerCase().endsWith(".json")) {
+    showProfileError("Выберите файл конфигурации с расширением .json.");
+    return;
+  }
+  if (file.size > MAX_PROFILE_CONFIG_BYTES) {
+    showProfileError("Файл конфигурации не должен превышать 1 МБ.");
+    return;
+  }
+
+  try {
+    let raw;
+    try {
+      raw = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+    } catch {
+      throw new Error("Файл конфигурации должен быть сохранён в кодировке UTF-8.");
+    }
+    let config;
+    try {
+      config = JSON.parse(raw);
+    } catch {
+      throw new Error("Не удалось прочитать JSON. Проверьте файл конфигурации.");
+    }
+    const expectedKeys = ["format", "version", "name", "profile"];
+    if (!config || typeof config !== "object" || Array.isArray(config)
+      || Object.keys(config).length !== expectedKeys.length
+      || expectedKeys.some((key) => !(key in config))) {
+      throw new Error("Файл должен содержать формат, версию, название и объект профиля.");
+    }
+    if (config.format !== PROFILE_CONFIG_FORMAT) throw new Error("Это не JSON-конфигурация Markdown → DOCX.");
+    if (config.version !== PROFILE_CONFIG_VERSION) throw new Error("Эта версия конфигурации не поддерживается.");
+    if (!validProfileName(config.name)) throw new Error("В конфигурации должно быть название длиной от 1 до 60 символов.");
+
+    const validatedProfile = await validateProfileOnServer(config.profile);
+    const name = uniqueProfileName(config.name);
+    const id = `custom-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+    const importedProfile = { id, name, profile: validatedProfile };
+    const nextProfiles = [...customProfiles, importedProfile];
+    if (!persistProfileState(nextProfiles, id)) return;
+
+    customProfiles = nextProfiles;
+    activeProfileId = id;
+    activeProfile = cloneProfile(validatedProfile);
+    renderProfilePicker();
+    clearFieldError("profile");
+    invalidateResult();
+    setFeedback(`Профиль «${name}» импортирован и выбран.`, "success");
+  } catch (error) {
+    showProfileError(profileRequestError(error));
+  }
+}
+
+function exportActiveProfile() {
+  const record = getProfileRecord(activeProfileId);
+  if (!record) {
+    showProfileError("Сначала выберите профиль для экспорта.");
+    return;
+  }
+  const payload = {
+    format: PROFILE_CONFIG_FORMAT,
+    version: PROFILE_CONFIG_VERSION,
+    name: record.name,
+    profile: cloneProfile(record.profile),
+  };
+  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${record.name.replace(/[\\/:*?"<>|]/g, "_")}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setFeedback(`Конфигурация «${record.name}» экспортирована.`, "success");
 }
 
 function setFeedback(message, kind = "") {
@@ -312,19 +670,6 @@ function setFieldError(field, message) {
   target.hidden = false;
   if (field === "source") sourceDropzone.setAttribute("aria-invalid", "true");
   if (field === "assets") assetsDropzone.setAttribute("aria-invalid", "true");
-  if (field === "profile") {
-    const invalidPaths = [...message.matchAll(/«profile\.([^»]+)»/g)].map((match) => match[1]);
-    for (const invalidPath of invalidPaths) {
-      const control = [...profileControls.querySelectorAll("[data-profile-path]")].find((item) => item.dataset.profilePath === invalidPath);
-      if (!control) continue;
-      control.setAttribute("aria-invalid", "true");
-      let parent = control.closest("details");
-      while (parent) {
-        parent.open = true;
-        parent = parent.parentElement.closest("details");
-      }
-    }
-  }
   setFeedback(message, "error");
 }
 
@@ -341,7 +686,11 @@ function clearFieldError(field) {
   }
   if (field === "source") sourceDropzone.removeAttribute("aria-invalid");
   if (field === "assets") assetsDropzone.removeAttribute("aria-invalid");
-  if (field === "profile") profileControls.querySelectorAll("[aria-invalid='true']").forEach((control) => control.removeAttribute("aria-invalid"));
+  if (field === "profile") {
+    profileControls.querySelectorAll("[aria-invalid='true']").forEach((control) => control.removeAttribute("aria-invalid"));
+    profileEditorName.removeAttribute("aria-invalid");
+    showProfileEditorError("");
+  }
   if (field === "headers") {
     document.querySelectorAll("#header-text, #footer-text, #numbering-start-page").forEach((control) => control.removeAttribute("aria-invalid"));
   }
@@ -679,10 +1028,38 @@ mainPath.addEventListener("change", () => clearFieldError("source"));
 resolution.addEventListener("change", () => clearFieldError("assets"));
 
 document.querySelector("#reset-profile").addEventListener("click", () => {
-  renderProfile();
-  clearFieldError("profile");
-  invalidateResult();
-  setFeedback("Исходные параметры оформления восстановлены.", "success");
+  activateProfile("academic");
+});
+
+profileSelect.addEventListener("change", () => activateProfile(profileSelect.value));
+document.querySelector("#edit-profile").addEventListener("click", () => openProfileEditor());
+document.querySelector("#create-profile").addEventListener("click", () => openProfileEditor({ create: true }));
+importProfileButton.addEventListener("click", () => importProfileInput.click());
+document.querySelector("#export-profile").addEventListener("click", exportActiveProfile);
+document.querySelector("#cancel-profile-edit").addEventListener("click", () => profileDialog.close());
+profileEditorForm.addEventListener("submit", saveProfileDraft);
+profileEditorName.addEventListener("input", () => {
+  profileEditorName.removeAttribute("aria-invalid");
+  showProfileEditorError("");
+});
+profileEditorForm.addEventListener("input", (event) => {
+  if (event.target.matches("[data-profile-path]")) {
+    event.target.removeAttribute("aria-invalid");
+    showProfileEditorError("");
+  }
+});
+profileDialog.addEventListener("close", () => showProfileEditorError(""));
+importProfileInput.addEventListener("change", async () => {
+  const file = importProfileInput.files?.[0];
+  importProfileButton.disabled = true;
+  importProfileButton.textContent = "Проверка JSON…";
+  try {
+    await importProfileFile(file);
+  } finally {
+    importProfileInput.value = "";
+    importProfileButton.disabled = false;
+    importProfileButton.textContent = "Импортировать JSON";
+  }
 });
 
 function firstInvalidProfileControl() {
@@ -727,14 +1104,6 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  const invalidProfile = firstInvalidProfileControl();
-  if (invalidProfile) {
-    setFieldError("profile", "Проверьте выделенные параметры оформления.");
-    invalidProfile.setAttribute("aria-invalid", "true");
-    invalidProfile.focus();
-    return;
-  }
-
   const headerMode = document.querySelector("#header-mode").value;
   const footerMode = document.querySelector("#footer-mode").value;
   if ((headerMode === "text" && !document.querySelector("#header-text").value.trim()) || (footerMode === "text" && !document.querySelector("#footer-text").value.trim())) {
@@ -756,7 +1125,7 @@ form.addEventListener("submit", async (event) => {
   invalidateResult();
 
   try {
-    const response = await fetch("/api/convert", { method: "POST", body: buildFormData(readProfile()) });
+    const response = await fetch("/api/convert", { method: "POST", body: buildFormData(activeProfile) });
     const contentType = response.headers.get("Content-Type") ?? "";
     if (!response.ok || contentType.includes("application/json")) {
       const payload = await response.json();
@@ -804,7 +1173,7 @@ function resetForNewFile() {
   downloadLink.removeAttribute("href");
   numberingStartPage.value = "1";
   numberingMode.value = "continue";
-  renderProfile();
+  renderProfilePicker();
   updateHeaderPreview();
   window.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   sourceInput.focus({ preventScroll: true });
@@ -813,6 +1182,7 @@ function resetForNewFile() {
 document.querySelector("#new-file-button").addEventListener("click", resetForNewFile);
 
 function handleFormEdit(event) {
+  if (event.target.matches("#active-profile")) return;
   if (event.target.matches("[data-profile-path]")) {
     event.target.removeAttribute("aria-invalid");
     clearFieldError("profile");
@@ -827,6 +1197,7 @@ function handleFormEdit(event) {
 form.addEventListener("input", handleFormEdit);
 form.addEventListener("change", handleFormEdit);
 
-renderProfile();
+restoreProfileState();
+renderProfilePicker();
 renderAssetList();
 updateHeaderPreview();

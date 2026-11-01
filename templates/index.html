@@ -7,6 +7,7 @@
     <title>Markdown → DOCX</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <script id="default-profile" type="application/json">{{ default_profile|tojson }}</script>
+    <script id="profile-presets" type="application/json">{{ profile_presets|tojson }}</script>
     <script src="{{ url_for('static', filename='app.js') }}" defer></script>
   </head>
   <body>
@@ -175,18 +176,55 @@
             <span class="section-number" aria-hidden="true">04</span>
             <div>
               <h2 id="profile-heading">Профиль оформления</h2>
-              <p>Измените любой параметр. Сброс вернёт исходные академические настройки.</p>
+              <p>Выберите готовые настройки или настройте собственный профиль.</p>
             </div>
           </div>
 
-          <div id="profile-controls" class="profile-groups"></div>
-          <p id="profile-error" class="field-error" role="alert" hidden></p>
-          <button id="reset-profile" class="button button-secondary profile-reset" type="button">Вернуть значения по умолчанию</button>
+          <div class="profile-card">
+            <div class="profile-card-main">
+              <label for="active-profile">Активный профиль</label>
+              <select id="active-profile" name="active_profile" aria-describedby="profile-summary">
+                <optgroup label="Встроенные профили" id="builtin-profile-options"></optgroup>
+                <optgroup label="Мои профили" id="custom-profile-options"></optgroup>
+              </select>
+              <button id="edit-profile" class="button button-secondary" type="button">Настроить</button>
+              <p id="profile-summary" class="profile-summary" aria-live="polite"></p>
+            </div>
+            <div class="profile-actions" aria-label="Действия с профилями">
+              <button id="create-profile" class="button button-secondary" type="button">Создать</button>
+              <button id="import-profile" class="button button-secondary" type="button">Импортировать JSON</button>
+              <button id="export-profile" class="button button-secondary" type="button">Экспортировать JSON</button>
+              <button id="reset-profile" class="button button-text" type="button">Академический профиль</button>
+              <input id="profile-import-file" class="visually-hidden" type="file" accept=".json,application/json" tabindex="-1" aria-hidden="true">
+            </div>
+            <p id="profile-error" class="field-error" role="alert" hidden></p>
+          </div>
         </section>
 
         <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
         <button id="convert-button" class="button button-primary submit-button" type="submit">Преобразовать в DOCX</button>
       </form>
+
+      <dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-dialog-title" aria-describedby="profile-dialog-description">
+        <form id="profile-editor-form" class="profile-editor-form" novalidate>
+          <div class="profile-dialog-heading">
+            <div>
+              <h2 id="profile-dialog-title">Настроить профиль</h2>
+            </div>
+          </div>
+          <p id="profile-dialog-description" class="profile-dialog-description">Изменения применятся после сохранения. Встроенные профили можно сохранить как собственную копию.</p>
+          <div class="profile-name-control">
+            <label for="profile-name">Название профиля</label>
+            <input id="profile-name" name="profile_name" type="text" maxlength="60" required autocomplete="off">
+          </div>
+          <div id="profile-controls" class="profile-groups"></div>
+          <p id="profile-editor-error" class="field-error" role="alert" hidden></p>
+          <div class="dialog-actions profile-dialog-actions">
+            <button id="cancel-profile-edit" class="button button-secondary" type="button">Отмена</button>
+            <button id="save-profile" class="button button-primary" type="submit">Сохранить профиль</button>
+          </div>
+        </form>
+      </dialog>
 
       <section id="result" class="result-panel" aria-live="polite" hidden>
         <div>

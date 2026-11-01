@@ -154,6 +154,39 @@ def default_profile() -> dict[str, Any]:
     return deepcopy(DEFAULT_PROFILE)
 
 
+def profile_presets() -> list[dict[str, Any]]:
+    academic = default_profile()
+
+    compact = default_profile()
+    compact["body"].update(font_size_pt=11, line_spacing=1.15)
+
+    business = default_profile()
+    business["body"].update(
+        font_family="Arial",
+        font_size_pt=11,
+        line_spacing=1.15,
+        first_line_indent_mm=0,
+    )
+
+    return [
+        {
+            "id": "academic",
+            "name": "Академический",
+            "profile": academic,
+        },
+        {
+            "id": "compact",
+            "name": "Компактный",
+            "profile": compact,
+        },
+        {
+            "id": "business",
+            "name": "Деловой",
+            "profile": business,
+        },
+    ]
+
+
 def _bounds(path: str) -> tuple[float, float]:
     key = path.rsplit(".", 1)[-1]
     if key in {"width_mm", "height_mm"}:
