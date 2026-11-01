@@ -33,6 +33,7 @@ MAX_IMAGE_BYTES = 30 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = MAX_REQUEST_BYTES
 MAX_IMAGE_PIXELS = 60_000_000
 MAX_SANITIZED_IMAGE_PIXELS = 20_000_000
+MAX_IMAGE_PAGE_HEIGHT_RATIO = 0.82
 MAX_REMOTE_REDIRECTS = 3
 IMAGE_FORMATS = {"PNG", "JPEG", "GIF", "BMP", "TIFF", "WEBP"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
@@ -1159,10 +1160,17 @@ class DocxRenderer:
                 data = self.image_data[src]
                 with Image.open(io.BytesIO(data)) as image:
                     width_px = image.width
+                    height_px = image.height
                     dpi = image.info.get("dpi", (96, 96))[0]
                 dpi_width = max(1, width_px) / (dpi if dpi and dpi > 0 else 96)
-                maximum_width = self.content_width * self.profile["images"]["max_width_percent"] / 100
-                width = min(Inches(dpi_width), maximum_width)
+                maximum_width_emu = int(self.content_width * self.profile["images"]["max_width_percent"] / 100)
+                width_emu = min(Inches(dpi_width).emu, maximum_width_emu)
+                section = self.document.sections[0]
+                content_height = section.page_height - section.top_margin - section.bottom_margin
+                maximum_height_emu = int(content_height * MAX_IMAGE_PAGE_HEIGHT_RATIO)
+                if height_px > 0:
+                    width_emu = min(width_emu, int(maximum_height_emu * width_px / height_px))
+                width = Emu(width_emu)
                 run = paragraph.add_run()
                 picture = run.add_picture(io.BytesIO(data), width=width)
                 alt = child.attrGet("alt") or child.content or ""

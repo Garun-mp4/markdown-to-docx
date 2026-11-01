@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import struct
 import zipfile
+import zlib
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +40,15 @@ def png_bytes(color=(20, 50, 90)):
     return buffer.getvalue()
 
 
+def png_header_bytes(width, height):
+    def chunk(name, data):
+        checksum = zlib.crc32(name + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + name + data + struct.pack(">I", checksum)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IEND", b"")
+
+
 def test_upload_limits_allow_30mb_per_image_and_200mb_total():
     assert MAX_IMAGE_BYTES == 30 * 1024 * 1024
     assert MAX_REQUEST_BYTES == 200 * 1024 * 1024
@@ -69,6 +80,70 @@ def test_individual_resource_respects_the_per_image_size_limit(monkeypatch):
         collect_project(source, [oversized_image], "")
 
 
+def test_image_resolution_slightly_above_60_megapixels_is_rejected_without_decoding_pixels():
+    response = app.test_client().post(
+        "/api/convert",
+        data=MultiDict([
+            ("source", (io.BytesIO(b"![Large](oversized.png)"), "report.md")),
+            ("assets", (io.BytesIO(png_header_bytes(10_000, 6_001)), "oversized.png")),
+        ]),
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    assert response.json["field"] == "assets"
+    assert "безопасный предел 60 Мп" in response.json["error"]
+
+
+@pytest.mark.parametrize("image_data", [b"not an image", b"<svg xmlns='http://www.w3.org/2000/svg'/>"])
+def test_api_rejects_corrupt_or_unsupported_image_content(image_data):
+    response = app.test_client().post(
+        "/api/convert",
+        data=MultiDict([
+            ("source", (io.BytesIO(b"![Bad image](image.png)"), "report.md")),
+            ("assets", (io.BytesIO(image_data), "image.png")),
+        ]),
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    assert response.json["field"] == "assets"
+    assert "не является поддерживаемым изображением" in response.json["error"]
+
+
+def test_api_reports_a_corrupted_project_archive_as_a_source_error():
+    response = app.test_client().post(
+        "/api/convert",
+        data={"source": (io.BytesIO(b"not a ZIP archive"), "project.zip")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    assert response.json["field"] == "source"
+    assert "Проверьте файл" in response.json["error"]
+
+
+def test_api_handles_malformed_markdown_and_preserves_unparsed_table_text():
+    markdown = (
+        "# Broken heading\n\n"
+        "An unclosed *emphasis marker\n\n"
+        "| A | B |\n| --- |\n| uneven row | extra |\n"
+    )
+
+    response = app.test_client().post(
+        "/api/convert",
+        data={"source": (io.BytesIO(markdown.encode("utf-8")), "broken-markdown.md")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    document = Document(io.BytesIO(response.data))
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "Broken heading" in text
+    assert "An unclosed *emphasis marker" in text
+    assert "uneven row" in text and "extra" in text
+
+
 def test_large_jpeg_is_downsampled_safely_before_sanitizing():
     original = io.BytesIO()
     Image.new("RGB", (7000, 6000), (80, 120, 60)).save(original, format="JPEG", quality=90)
@@ -88,6 +163,28 @@ def test_large_jpeg_is_downsampled_safely_before_sanitizing():
         footer_text="",
     )))
     assert len(document.inline_shapes) == 1
+
+
+def test_portrait_image_is_capped_to_leave_room_for_heading_and_caption():
+    original = io.BytesIO()
+    Image.new("RGB", (3212, 4818), (80, 120, 60)).save(
+        original, format="JPEG", dpi=(72, 72), quality=85
+    )
+    markdown = "# Photo test\n\n![Photo](portrait.jpg)\n\nРисунок 1 — Фото"
+    sanitized = converter._sanitize_image(original.getvalue(), "portrait.jpg")
+
+    document = Document(io.BytesIO(build_docx(
+        markdown,
+        {"portrait.jpg": sanitized},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )))
+
+    section = document.sections[0]
+    content_height = section.page_height - section.top_margin - section.bottom_margin
+    assert document.inline_shapes[0].height <= int(content_height * 0.82)
 
 
 def test_project_and_resource_zips_share_the_unpacked_size_budget(monkeypatch):

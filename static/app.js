@@ -213,8 +213,13 @@ function createProfileControl(path, value) {
   control.id = id;
   control.dataset.profilePath = path;
   control.required = type !== "checkbox";
-  if (type === "checkbox") control.checked = value;
-  else control.value = String(value);
+  if (type === "checkbox") {
+    control.checked = value;
+    control.defaultChecked = value;
+  } else {
+    control.defaultValue = String(value);
+    control.value = String(value);
+  }
   if (type !== "checkbox") wrapper.append(label, control);
   else wrapper.append(control, label);
   return wrapper;
