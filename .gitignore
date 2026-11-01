@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.docx
+*.pdf
+.playwright-cli/
+responsive.png
+docx-preview.png

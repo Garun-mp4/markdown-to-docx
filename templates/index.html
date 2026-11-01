@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Преобразование Markdown в оформленный документ DOCX">
+    <title>Markdown → DOCX</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <p class="eyebrow">Учебные и отчётные документы</p>
+        <h1>Markdown → DOCX</h1>
+        <p class="intro">Загрузите Markdown-файл, задайте колонтитулы и получите редактируемый документ Word.</p>
+      </header>
+
+      <form id="convert-form" novalidate>
+        <section class="form-section" aria-labelledby="source-heading">
+          <h2 id="source-heading">1. Исходный файл</h2>
+          <label for="source">Markdown-файл или ZIP-архив проекта</label>
+          <input id="source" name="source" type="file" accept=".md,.zip" required>
+          <p class="help">В ZIP можно поместить Markdown и изображения с сохранением папок.</p>
+          <p class="help">Лимит запроса — 50 МБ; изображений — до 10 МБ каждое и до 30 МБ суммарно.</p>
+          <p id="source-name" class="file-name" aria-live="polite"></p>
+
+          <label for="assets">Отдельный ZIP с изображениями <span class="optional">необязательно</span></label>
+          <input id="assets" name="assets" type="file" accept=".zip">
+          <p class="help">Используйте его, если загружаете отдельный Markdown-файл.</p>
+          <div id="markdown-choice" class="choice-panel" hidden>
+            <label for="main-path">В архиве несколько Markdown-файлов. Выберите основной</label>
+            <select id="main-path" name="main_path"></select>
+          </div>
+        </section>
+
+        <section class="form-section" aria-labelledby="headers-heading">
+          <h2 id="headers-heading">2. Колонтитулы</h2>
+          <div class="field-grid">
+            <fieldset>
+              <legend>Верхний колонтитул</legend>
+              <label for="header-mode">Содержимое</label>
+              <select id="header-mode" name="header_mode">
+                <option value="none">Не использовать</option>
+                <option value="text">Текст</option>
+                <option value="page">Номер страницы</option>
+              </select>
+              <label for="header-text" class="visually-hidden">Текст верхнего колонтитула</label>
+              <input id="header-text" name="header_text" type="text" maxlength="240" placeholder="Например, название работы" hidden>
+            </fieldset>
+            <fieldset>
+              <legend>Нижний колонтитул</legend>
+              <label for="footer-mode">Содержимое</label>
+              <select id="footer-mode" name="footer_mode">
+                <option value="none">Не использовать</option>
+                <option value="text">Текст</option>
+                <option value="page">Номер страницы</option>
+              </select>
+              <label for="footer-text" class="visually-hidden">Текст нижнего колонтитула</label>
+              <input id="footer-text" name="footer_text" type="text" maxlength="240" placeholder="Например, Фамилия И. О." hidden>
+            </fieldset>
+          </div>
+          <p class="help">Текст можно указать в одном колонтитуле, а автоматическую нумерацию — в другом.</p>
+        </section>
+
+        <section class="form-section" aria-labelledby="profile-heading">
+          <h2 id="profile-heading">3. Профиль оформления</h2>
+          <p>Единый академический профиль MVP: формат A4, Times New Roman, таблицы и подписи по заданным правилам.</p>
+          <details>
+            <summary>Кратко о настройках</summary>
+            <ul>
+              <li>Основной текст — 12 pt, интервал 1,5, отступ первой строки 12,5 мм.</li>
+              <li>Заголовки H1–H6 — от 20 до 12 pt, полужирные.</li>
+              <li>Поля страницы: слева 30 мм, справа 15 мм, сверху и снизу 20 мм.</li>
+            </ul>
+          </details>
+        </section>
+
+        <section id="resolution" class="resolution" aria-live="polite" hidden></section>
+        <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+        <button id="convert-button" type="submit">Преобразовать и скачать DOCX</button>
+      </form>
+
+      <footer class="page-footer">
+        <p>Файлы обрабатываются для создания документа и не сохраняются после ответа.</p>
+      </footer>
+    </main>
+  </body>
+</html>
