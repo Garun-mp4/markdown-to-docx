@@ -312,8 +312,35 @@ def test_page_number_is_conditional_and_uses_selected_start_page(mode, expected_
     )
     assert "IF" in instructions
     assert "PAGE" in instructions
-    assert '>= "4"' in instructions
+    assert ">= 4" in instructions
     assert expected_result in instructions
+
+
+@pytest.mark.parametrize("mode", ["continue", "restart"])
+@pytest.mark.parametrize("location", ["header", "footer"])
+def test_page_number_starting_on_first_page_uses_a_direct_page_field(mode, location):
+    content = build_docx(
+        "Page number test",
+        {},
+        header_mode="page" if location == "header" else "none",
+        header_text="",
+        footer_mode="page" if location == "footer" else "none",
+        footer_text="",
+        numbering_mode=mode,
+    )
+    document = Document(io.BytesIO(content))
+    instructions = [
+        node.text or ""
+        for node in getattr(document.sections[0], location)._element.iter(qn("w:instrText"))
+    ]
+    begin_field = next(
+        node
+        for node in getattr(document.sections[0], location)._element.iter(qn("w:fldChar"))
+        if node.get(qn("w:fldCharType")) == "begin"
+    )
+
+    assert instructions == [" PAGE "]
+    assert begin_field.get(qn("w:dirty")) == "true"
 
 
 def test_page_number_rejects_invalid_start_page():
@@ -846,7 +873,7 @@ def test_api_accepts_multiple_uploaded_images_with_folder_paths_and_profile():
         for node in document.sections[0].footer._element.iter(qn("w:instrText"))
     )
     assert "IF" in instructions
-    assert '>= "3"' in instructions
+    assert ">= 3" in instructions
     assert " - 2 " in instructions
 
 

@@ -1728,9 +1728,11 @@ def _append_field(paragraph, instruction: str, result: str, hidden: bool = False
     paragraph.add_run()._r.append(end)
 
 
-def _append_field_char(paragraph, kind: str):
+def _append_field_char(paragraph, kind: str, *, dirty: bool = False):
     node = OxmlElement("w:fldChar")
     node.set(qn("w:fldCharType"), kind)
+    if dirty:
+        node.set(qn("w:dirty"), "true")
     paragraph.add_run()._r.append(node)
 
 
@@ -1741,8 +1743,8 @@ def _append_instruction(paragraph, instruction: str):
     paragraph.add_run()._r.append(node)
 
 
-def _append_nested_page_field(paragraph, cached: str):
-    _append_field_char(paragraph, "begin")
+def _append_page_field(paragraph, cached: str):
+    _append_field_char(paragraph, "begin", dirty=True)
     _append_instruction(paragraph, " PAGE ")
     _append_field_char(paragraph, "separate")
     paragraph.add_run(cached)
@@ -1750,9 +1752,9 @@ def _append_nested_page_field(paragraph, cached: str):
 
 
 def _append_nested_calculation(paragraph, start_page: int):
-    _append_field_char(paragraph, "begin")
+    _append_field_char(paragraph, "begin", dirty=True)
     _append_instruction(paragraph, " = ")
-    _append_nested_page_field(paragraph, str(start_page))
+    _append_page_field(paragraph, str(start_page))
     _append_instruction(paragraph, f" - {start_page - 1} ")
     _append_field_char(paragraph, "separate")
     paragraph.add_run("1")
@@ -1760,15 +1762,19 @@ def _append_nested_calculation(paragraph, start_page: int):
 
 
 def _append_conditional_page_number(paragraph, start_page: int, mode: str):
-    _append_field_char(paragraph, "begin")
+    if start_page == 1:
+        _append_page_field(paragraph, "1")
+        return
+
+    _append_field_char(paragraph, "begin", dirty=True)
     _append_instruction(paragraph, " IF ")
-    _append_nested_page_field(paragraph, str(start_page))
-    _append_instruction(paragraph, f' >= "{start_page}" "')
+    _append_page_field(paragraph, str(start_page))
+    _append_instruction(paragraph, f' >= {start_page} "')
     if mode == "restart":
         _append_nested_calculation(paragraph, start_page)
         cached = "1"
     else:
-        _append_nested_page_field(paragraph, str(start_page))
+        _append_page_field(paragraph, str(start_page))
         cached = str(start_page)
     _append_instruction(paragraph, '" "" ')
     _append_field_char(paragraph, "separate")
