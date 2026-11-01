@@ -1007,7 +1007,7 @@ class DocxRenderer:
 
     def _table_column_widths(self, rows: list[list[Any]], column_count: int) -> list[float]:
         total_width = self.content_width / 36_000
-        minimum = min(18.0, total_width / column_count)
+        minimum = min(22.0, total_width / column_count)
         maximum = total_width if column_count <= 2 else total_width * 0.48
         weights: list[float] = []
         for column_index in range(column_count):
@@ -1167,7 +1167,7 @@ class DocxRenderer:
         previous = previous_paragraphs[-1] if previous_paragraphs else None
         first_capacity, later_capacity = self._table_page_capacities(previous, bool(caption))
         estimated_total = sum(self._estimated_row_height(row, column_widths) for row in rows)
-        if estimated_total <= first_capacity:
+        if estimated_total <= first_capacity or not caption:
             if caption:
                 self._add_caption(caption, table=True)
             self._add_table_rows(rows, column_widths)
@@ -1181,8 +1181,6 @@ class DocxRenderer:
             elif previous:
                 page_break_before = True
             self._add_caption(caption, table=True, page_break_before=page_break_before)
-        else:
-            self.document.add_page_break()
         pages = self._paginate_table_rows(rows, column_widths, first_capacity, later_capacity)
         for page_index, data_rows in enumerate(pages):
             if page_index:

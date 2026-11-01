@@ -193,6 +193,23 @@ def test_medium_table_uses_page_space_without_an_early_manual_split():
     assert not any(paragraph.text == "Продолжение таблицы 4" for paragraph in document.paragraphs)
 
 
+def test_long_uncaptioned_table_flows_as_one_native_word_table():
+    data_rows = "\n".join(f"| Feature {index} | Description {index} |" for index in range(1, 45))
+    content = build_docx(
+        "Introductory paragraph.\n\n| Feature | Description |\n|---|---|\n" + data_rows,
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    assert len(document.tables) == 1
+    assert len(document.tables[0].rows) == 45
+    assert "w:tblHeader" in document.tables[0].rows[0]._tr.xml
+    assert not any("w:type=\"page\"" in paragraph._p.xml for paragraph in document.paragraphs)
+
+
 def test_long_table_is_split_with_repeated_headers_and_continuation_caption():
     data_rows = "\n".join(f"| Элемент {index} | Значение {index} |" for index in range(1, 45))
     content = build_docx(
@@ -240,6 +257,20 @@ def test_table_column_reserves_room_for_long_unbroken_words():
     )
     document = Document(io.BytesIO(content))
     assert document.tables[0].columns[0].width >= Mm(35)
+
+
+def test_table_minimum_column_width_keeps_short_words_intact():
+    content = build_docx(
+        "| Token | Name | Color | Role | Variable |\n|---|---|---|---|---|\n"
+        "| bg-marketing | Marketing Black | #08090a | Marketing page canvas | --color-bg-marketing |",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    assert document.tables[0].columns[1].width >= Mm(22)
 
 
 def test_large_table_keeps_its_section_heading_with_the_table():
