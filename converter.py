@@ -18,7 +18,7 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Emu, Inches, Mm, Pt
+from docx.shared import Emu, Inches, Mm, Pt, RGBColor
 from markdown_it import MarkdownIt
 from PIL import Image, UnidentifiedImageError
 
@@ -33,6 +33,8 @@ PAGEBREAK_MARKER = "DOCX_PAGEBREAK_4cf49205"
 TABLE_CAPTION = re.compile(r"^\s*Таблица\s+([\w.-]+)\s*[—\-:]\s*(\S.*)\s*$", re.IGNORECASE)
 FIGURE_CAPTION = re.compile(r"^\s*Рисунок\s+([\w.-]+)\s*[—\-:]\s*(\S.*)\s*$", re.IGNORECASE)
 PAGEBREAK_DIRECTIVE = re.compile(r"(?m)^[ \t]*<!--[ \t]*pagebreak[ \t]*-->[ \t]*$", re.IGNORECASE)
+SIMPLE_TABLE_BORDER = re.compile(r"^\s*-{12,}\s*$")
+SIMPLE_TABLE_SEPARATOR = re.compile(r"^\s*-{3,}(?:\s+-{3,})+\s*$")
 WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -174,8 +176,12 @@ def collect_project(source, resources_upload, main_path: str) -> tuple[str, str,
     return markdown_text, markdown_name, markdown_path, project_assets + resource_assets
 
 
+def _markdown_parser():
+    return MarkdownIt("commonmark", {"html": False}).enable(["table", "strikethrough"])
+
+
 def _image_tokens(markdown: str):
-    parser = MarkdownIt("commonmark", {"html": False}).enable("table")
+    parser = _markdown_parser()
     prepared = PAGEBREAK_DIRECTIVE.sub(PAGEBREAK_MARKER, markdown)
     tokens = parser.parse(prepared)
     refs: list[str] = []
@@ -183,6 +189,102 @@ def _image_tokens(markdown: str):
         if token.type == "inline" and token.children:
             refs.extend(child.attrGet("src") for child in token.children if child.type == "image")
     return parser, tokens, [ref for ref in refs if ref]
+
+
+def _simple_table_column_starts(header: str) -> list[int]:
+    starts: list[int] = []
+    previous_end = 0
+    for match in re.finditer(r"\S+", header):
+        if not starts or len(header[previous_end:match.start()]) >= 2:
+            starts.append(match.start())
+        previous_end = match.end()
+    return starts
+
+
+def _split_simple_table_row(line: str, starts: list[int]) -> list[str]:
+    boundaries = [*starts, len(line)]
+    return [line[boundaries[index]:boundaries[index + 1]].strip() for index in range(len(starts))]
+
+
+def _normalize_pandoc_simple_tables(markdown: str) -> str:
+    """Convert Pandoc simple tables into pipe tables before CommonMark parsing."""
+    lines = markdown.splitlines()
+    normalized: list[str] = []
+    index = 0
+    in_fence = False
+
+    while index < len(lines):
+        line = lines[index]
+        if re.match(r"^\s{0,3}(```+|~~~+)", line):
+            in_fence = not in_fence
+            normalized.append(line)
+            index += 1
+            continue
+        if in_fence or not SIMPLE_TABLE_BORDER.fullmatch(line) or index + 2 >= len(lines):
+            normalized.append(line)
+            index += 1
+            continue
+
+        header = lines[index + 1]
+        separator = lines[index + 2]
+        starts = _simple_table_column_starts(header)
+        dash_groups = list(re.finditer(r"-{3,}", separator))
+        if (
+            not SIMPLE_TABLE_SEPARATOR.fullmatch(separator)
+            or len(starts) < 2
+            or len(dash_groups) != len(starts)
+            or any(abs(group.start() - start) > 2 for group, start in zip(dash_groups, starts))
+        ):
+            normalized.append(line)
+            index += 1
+            continue
+
+        bottom = next(
+            (
+                candidate
+                for candidate in range(index + 3, len(lines))
+                if SIMPLE_TABLE_BORDER.fullmatch(lines[candidate])
+            ),
+            None,
+        )
+        if bottom is None:
+            normalized.append(line)
+            index += 1
+            continue
+
+        body_lines = lines[index + 3:bottom]
+        data_rows: list[list[str]] = []
+        current_row = [""] * len(starts)
+        physical_rows = 0
+
+        for body_line in body_lines:
+            if not body_line.strip():
+                if any(current_row):
+                    data_rows.append(current_row)
+                    current_row = [""] * len(starts)
+                continue
+            physical_rows += 1
+            for cell_index, value in enumerate(_split_simple_table_row(body_line, starts)):
+                if value:
+                    current_row[cell_index] = f"{current_row[cell_index]} {value}".strip()
+        if any(current_row):
+            data_rows.append(current_row)
+
+        if not data_rows or (physical_rows > 1 and len(data_rows) == 1):
+            normalized.append(line)
+            index += 1
+            continue
+
+        header_cells = _split_simple_table_row(header, starts)
+        table_rows = [header_cells, *data_rows]
+        for row in table_rows:
+            escaped = [cell.replace("|", r"\|") for cell in row]
+            normalized.append("| " + " | ".join(escaped) + " |")
+            if row is header_cells:
+                normalized.append("| " + " | ".join("---" for _ in starts) + " |")
+        index = bottom + 1
+
+    return "\n".join(normalized)
 
 
 def _is_absolute_local_path(src: str) -> bool:
@@ -397,11 +499,13 @@ def _matching_close(tokens, start: int, end: int) -> int:
 def _plain_inline(token) -> str:
     if token.children is None:
         return token.content
-    return "".join(
-        child.content if child.type in {"text", "code_inline", "html_inline"} else (child.content if child.type == "image" else "")
-        for child in token.children
-        if child.type not in {"softbreak", "hardbreak"}
-    )
+    parts = []
+    for child in token.children:
+        if child.type in {"softbreak", "hardbreak"}:
+            parts.append(" ")
+        elif child.type in {"text", "code_inline", "html_inline", "image"}:
+            parts.append(child.content)
+    return "".join(parts)
 
 
 def _parse_table(tokens, start: int, end: int) -> list[list[Any]]:
@@ -499,10 +603,12 @@ def _tag_block_captions(blocks: list[Block]) -> None:
                     _tag_block_captions([item])
 
 
-def _style_run(run, *, size=12, bold=False, italic=False, code=False, underline=False):
+def _style_run(run, *, size=12, bold=False, italic=False, strike=False, code=False, underline=False):
     run.bold = bold
     run.italic = italic
+    run.font.strike = strike
     run.underline = underline
+    run.font.color.rgb = RGBColor(0, 0, 0)
     run.font.name = "Consolas" if code else "Times New Roman"
     run.font.size = Pt(10 if code else size)
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "Consolas" if code else "Times New Roman")
@@ -513,7 +619,7 @@ def _style_run(run, *, size=12, bold=False, italic=False, code=False, underline=
         run._element.get_or_add_rPr().append(shading)
 
 
-def _add_hyperlink(paragraph, text: str, url: str, bold: bool, italic: bool):
+def _add_hyperlink(paragraph, text: str, url: str, bold: bool, italic: bool, strike: bool):
     relationship_id = paragraph.part.relate_to(
         url,
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
@@ -541,6 +647,8 @@ def _add_hyperlink(paragraph, text: str, url: str, bold: bool, italic: bool):
         properties.append(OxmlElement("w:b"))
     if italic:
         properties.append(OxmlElement("w:i"))
+    if strike:
+        properties.append(OxmlElement("w:strike"))
     run.append(properties)
     text_node = OxmlElement("w:t")
     text_node.text = text
@@ -575,6 +683,7 @@ class DocxRenderer:
         normal = styles["Normal"]
         normal.font.name = "Times New Roman"
         normal.font.size = Pt(12)
+        normal.font.color.rgb = RGBColor(0, 0, 0)
         normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
         normal._element.rPr.rFonts.set(qn("w:cs"), "Times New Roman")
         normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -591,6 +700,7 @@ class DocxRenderer:
             style.font.name = "Times New Roman"
             style.font.size = Pt(size)
             style.font.bold = True
+            style.font.color.rgb = RGBColor(0, 0, 0)
             style._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
             style._element.rPr.rFonts.set(qn("w:cs"), "Times New Roman")
             style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -624,13 +734,115 @@ class DocxRenderer:
             elif mode == "page":
                 _append_field(paragraph, "PAGE", "1")
 
+    @staticmethod
+    def _apply_quote_border(paragraph):
+        p_pr = paragraph._p.get_or_add_pPr()
+        borders = p_pr.find(qn("w:pBdr"))
+        if borders is None:
+            borders = OxmlElement("w:pBdr")
+            p_pr.append(borders)
+        left = borders.find(qn("w:left"))
+        if left is None:
+            left = OxmlElement("w:left")
+            borders.append(left)
+        left.set(qn("w:val"), "single")
+        left.set(qn("w:sz"), "8")
+        left.set(qn("w:space"), "6")
+        left.set(qn("w:color"), "666666")
+
+    def _new_ordered_list_id(self, start_number: int, depth: int, quote_depth: int) -> int:
+        numbering = self.document.part.numbering_part.element
+        abstract_ids = [int(node.get(qn("w:abstractNumId"))) for node in numbering.findall(qn("w:abstractNum"))]
+        num_ids = [int(node.get(qn("w:numId"))) for node in numbering.findall(qn("w:num"))]
+        abstract_id = max(abstract_ids, default=-1) + 1
+        num_id = max(num_ids, default=0) + 1
+
+        abstract = OxmlElement("w:abstractNum")
+        abstract.set(qn("w:abstractNumId"), str(abstract_id))
+        multi_level = OxmlElement("w:multiLevelType")
+        multi_level.set(qn("w:val"), "singleLevel")
+        abstract.append(multi_level)
+        level = OxmlElement("w:lvl")
+        level.set(qn("w:ilvl"), "0")
+        start = OxmlElement("w:start")
+        start.set(qn("w:val"), "1")
+        level.append(start)
+        number_format = OxmlElement("w:numFmt")
+        number_format.set(qn("w:val"), "decimal")
+        level.append(number_format)
+        level_text = OxmlElement("w:lvlText")
+        level_text.set(qn("w:val"), "%1.")
+        level.append(level_text)
+        justification = OxmlElement("w:lvlJc")
+        justification.set(qn("w:val"), "left")
+        level.append(justification)
+        paragraph_properties = OxmlElement("w:pPr")
+        tabs = OxmlElement("w:tabs")
+        tab = OxmlElement("w:tab")
+        tab.set(qn("w:val"), "num")
+        tab_position = 397 + depth * 397 + quote_depth * 567
+        tab.set(qn("w:pos"), str(tab_position))
+        tabs.append(tab)
+        paragraph_properties.append(tabs)
+        indent = OxmlElement("w:ind")
+        indent.set(qn("w:left"), str(tab_position))
+        indent.set(qn("w:hanging"), "227")
+        paragraph_properties.append(indent)
+        level.append(paragraph_properties)
+        abstract.append(level)
+
+        first_num = numbering.find(qn("w:num"))
+        insertion_index = numbering.index(first_num) if first_num is not None else len(numbering)
+        numbering.insert(insertion_index, abstract)
+
+        number = OxmlElement("w:num")
+        number.set(qn("w:numId"), str(num_id))
+        abstract_reference = OxmlElement("w:abstractNumId")
+        abstract_reference.set(qn("w:val"), str(abstract_id))
+        number.append(abstract_reference)
+        if start_number != 1:
+            override = OxmlElement("w:lvlOverride")
+            override.set(qn("w:ilvl"), "0")
+            start_override = OxmlElement("w:startOverride")
+            start_override.set(qn("w:val"), str(start_number))
+            override.append(start_override)
+            number.append(override)
+        numbering.append(number)
+        return num_id
+
+    @staticmethod
+    def _set_paragraph_numbering(paragraph, num_id: int):
+        p_pr = paragraph._p.get_or_add_pPr()
+        num_pr = OxmlElement("w:numPr")
+        level = OxmlElement("w:ilvl")
+        level.set(qn("w:val"), "0")
+        number = OxmlElement("w:numId")
+        number.set(qn("w:val"), str(num_id))
+        num_pr.append(level)
+        num_pr.append(number)
+        p_pr.insert_element_before(
+            num_pr,
+            "w:suppressLineNumbers",
+            "w:pBdr",
+            "w:shd",
+            "w:tabs",
+            "w:spacing",
+            "w:ind",
+            "w:contextualSpacing",
+            "w:jc",
+            "w:outlineLvl",
+            "w:rPr",
+            "w:sectPr",
+            "w:pPrChange",
+        )
+
     def add_paragraph(self, inline, *, alignment=None, indent=0, first_line=12.5, keep=False, size=12, bold=False, italic=False, quote_depth=0, code_block=False, cell=False):
         paragraph = self.document.add_paragraph()
         self._format_paragraph(paragraph, indent=indent, first_line=first_line, keep=keep, quote_depth=quote_depth, cell=cell)
         if alignment is not None:
             paragraph.alignment = alignment
         if code_block:
-            paragraph.paragraph_format.left_indent = Mm(10 + quote_depth * 7)
+            paragraph.paragraph_format.left_indent = Mm(10 + quote_depth * 10)
             paragraph.paragraph_format.first_line_indent = Mm(0)
             paragraph.paragraph_format.line_spacing = 1
             paragraph.paragraph_format.space_before = Pt(4)
@@ -644,23 +856,41 @@ class DocxRenderer:
 
     def _format_paragraph(self, paragraph, *, indent=0, first_line=12.5, keep=False, quote_depth=0, cell=False):
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        paragraph.paragraph_format.left_indent = Mm(indent + quote_depth * 7)
-        paragraph.paragraph_format.first_line_indent = Mm(0 if cell else first_line)
+        paragraph.paragraph_format.left_indent = Mm(indent + quote_depth * 10)
+        paragraph.paragraph_format.first_line_indent = Mm(0 if cell or quote_depth else first_line)
+        paragraph.paragraph_format.right_indent = Mm(8 if quote_depth else 0)
         paragraph.paragraph_format.line_spacing = 1.5
-        paragraph.paragraph_format.space_before = Pt(0)
-        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.space_before = Pt(4 if quote_depth else 0)
+        paragraph.paragraph_format.space_after = Pt(4 if quote_depth else 0)
         paragraph.paragraph_format.keep_together = keep
         paragraph.paragraph_format.widow_control = True
+        if quote_depth:
+            self._apply_quote_border(paragraph)
 
-    def _append_inline(self, paragraph, inline, *, size=12, bold=False, italic=False, code_block=False):
+    def _append_inline(
+        self,
+        paragraph,
+        inline,
+        *,
+        size=12,
+        bold=False,
+        italic=False,
+        code_block=False,
+        omit_text_prefix: str | None = None,
+    ):
         if inline is None or inline.children is None:
             if inline and inline.content:
                 _style_run(paragraph.add_run(inline.content), size=size, bold=bold, italic=italic, code=code_block)
             return
         bold_stack = [bold]
         italic_stack = [italic]
+        strike_stack = [False]
         link_stack: list[str | None] = []
         for child in inline.children:
+            content = child.content
+            if child.type == "text" and omit_text_prefix and content.startswith(omit_text_prefix):
+                content = content[len(omit_text_prefix):]
+                omit_text_prefix = None
             if child.type in {"strong_open"}:
                 bold_stack.append(True)
             elif child.type in {"strong_close"}:
@@ -672,10 +902,10 @@ class DocxRenderer:
                 if len(italic_stack) > 1:
                     italic_stack.pop()
             elif child.type in {"s_open"}:
-                italic_stack.append(False)
+                strike_stack.append(True)
             elif child.type in {"s_close"}:
-                if len(italic_stack) > 1:
-                    italic_stack.pop()
+                if len(strike_stack) > 1:
+                    strike_stack.pop()
             elif child.type == "link_open":
                 link_stack.append(child.attrGet("href"))
             elif child.type == "link_close":
@@ -686,15 +916,29 @@ class DocxRenderer:
                 if link_stack and link_stack[-1]:
                     scheme = urllib.parse.urlsplit(link_stack[-1]).scheme.lower()
                     if scheme in {"http", "https", "mailto"}:
-                        _add_hyperlink(paragraph, child.content, link_stack[-1], bold_stack[-1], italic_stack[-1])
+                        _add_hyperlink(
+                            paragraph,
+                            content,
+                            link_stack[-1],
+                            bold_stack[-1],
+                            italic_stack[-1],
+                            strike_stack[-1],
+                        )
                     else:
-                        _style_run(paragraph.add_run(child.content), size=size, bold=bold_stack[-1], italic=italic_stack[-1])
+                        _style_run(
+                            paragraph.add_run(content),
+                            size=size,
+                            bold=bold_stack[-1],
+                            italic=italic_stack[-1],
+                            strike=strike_stack[-1],
+                        )
                 else:
                     _style_run(
-                        paragraph.add_run(child.content),
+                        paragraph.add_run(content),
                         size=size,
                         bold=bold_stack[-1],
                         italic=italic_stack[-1],
+                        strike=strike_stack[-1],
                         code=is_code,
                     )
             elif child.type == "image":
@@ -709,10 +953,18 @@ class DocxRenderer:
                 picture = run.add_picture(io.BytesIO(data), width=width)
                 alt = child.attrGet("alt") or child.content or ""
                 picture._inline.docPr.set("descr", alt)
-            elif child.type in {"softbreak", "hardbreak"}:
+            elif child.type == "softbreak":
+                paragraph.add_run(" ")
+            elif child.type == "hardbreak":
                 paragraph.add_run().add_break()
             elif child.type == "html_inline":
-                _style_run(paragraph.add_run(child.content), size=size, bold=bold_stack[-1], italic=italic_stack[-1])
+                _style_run(
+                    paragraph.add_run(child.content),
+                    size=size,
+                    bold=bold_stack[-1],
+                    italic=italic_stack[-1],
+                    strike=strike_stack[-1],
+                )
 
     def _add_caption(self, caption: tuple[str, str], *, table: bool, page_break_before: bool = False):
         number, title = caption
@@ -728,7 +980,7 @@ class DocxRenderer:
 
     @staticmethod
     def _estimated_cell_lines(inline, characters_per_line: int) -> int:
-        text = _plain_inline(inline) if inline else ""
+        text = " ".join((_plain_inline(inline) if inline else "").split())
         words = text.split()
         if not words:
             return 1
@@ -753,33 +1005,115 @@ class DocxRenderer:
                 occupied = 0
         return max(1, lines)
 
-    def _estimated_row_height(self, row_tokens: list[Any], column_count: int) -> float:
-        column_width_mm = int(self.content_width) / 36_000 / max(1, column_count)
-        characters_per_line = max(8, int((column_width_mm - 4) / 1.9))
-        text_lines = max((self._estimated_cell_lines(cell, characters_per_line) for cell in row_tokens), default=1)
+    def _table_column_widths(self, rows: list[list[Any]], column_count: int) -> list[float]:
+        total_width = self.content_width / 36_000
+        minimum = min(18.0, total_width / column_count)
+        maximum = total_width if column_count <= 2 else total_width * 0.48
+        weights: list[float] = []
+        for column_index in range(column_count):
+            cell_texts = [
+                " ".join(_plain_inline(row[column_index]).split())
+                for row in rows
+                if column_index < len(row) and row[column_index]
+                if " ".join(_plain_inline(row[column_index]).split())
+            ]
+            if not cell_texts:
+                weights.append(12.0)
+                continue
+            lengths = sorted(len(text) for text in cell_texts)
+            typical = lengths[int((len(lengths) - 1) * 0.75)]
+            longest_word = max(len(word) for text in cell_texts for word in text.split())
+            typical_weight = min(48, max(8, typical))
+            word_weight = min(72, longest_word * 2)
+            weights.append(float(max(typical_weight, word_weight)))
+
+        widths = [0.0] * column_count
+        active = set(range(column_count))
+        remaining = total_width
+        while active:
+            total_weight = sum(weights[index] for index in active)
+            constrained = False
+            for index in list(active):
+                proposed = remaining * weights[index] / total_weight
+                if proposed < minimum:
+                    widths[index] = minimum
+                    remaining -= minimum
+                    active.remove(index)
+                    constrained = True
+                elif proposed > maximum:
+                    widths[index] = maximum
+                    remaining -= maximum
+                    active.remove(index)
+                    constrained = True
+            if not constrained:
+                for index in active:
+                    widths[index] = remaining * weights[index] / total_weight
+                break
+        return widths
+
+    def _estimated_row_height(self, row_tokens: list[Any], column_widths: list[float]) -> float:
+        estimated_lines = []
+        for column_index, cell in enumerate(row_tokens):
+            width_mm = column_widths[column_index] if column_index < len(column_widths) else min(column_widths)
+            characters_per_line = max(8, int((width_mm - 3.2) / 1.9))
+            estimated_lines.append(self._estimated_cell_lines(cell, characters_per_line))
+        text_lines = max(estimated_lines, default=1)
         image_height = 35 if any(
             child.type == "image"
             for cell in row_tokens
             if cell and cell.children
             for child in cell.children
         ) else 0
-        return max(text_lines * 6.2 + 3.5, image_height + 3.5)
+        return max(text_lines * 6.35 + 2.5, image_height + 2.5)
 
-    def _paginate_table_rows(self, data_rows: list[list[Any]], column_count: int, first_capacity: float, later_capacity: float) -> list[list[list[Any]]]:
-        header_height = self._estimated_row_height(data_rows[0], column_count) if data_rows else 0
+    def _estimated_paragraph_height_mm(self, paragraph) -> float:
+        font_size = paragraph.style.font.size or Pt(12)
+        width_mm = self.content_width / 36_000
+        characters_per_line = max(12, int(width_mm / (font_size.pt * 0.17)))
+        text_length = len(" ".join(paragraph.text.split()))
+        line_count = max(1, (text_length + characters_per_line - 1) // characters_per_line)
+        spacing = paragraph.paragraph_format.line_spacing
+        line_multiplier = spacing if isinstance(spacing, (float, int)) else 1.5
+        line_height_mm = font_size.pt * line_multiplier / 2.83465
+        before = paragraph.paragraph_format.space_before or paragraph.style.paragraph_format.space_before or Pt(0)
+        after = paragraph.paragraph_format.space_after or paragraph.style.paragraph_format.space_after or Pt(0)
+        return line_count * line_height_mm + before / 36_000 + after / 36_000
+
+    def _table_page_capacities(self, previous, has_caption: bool) -> tuple[float, float]:
+        section = self.document.sections[0]
+        page_height = (section.page_height - section.top_margin - section.bottom_margin) / 36_000
+        heading_height = (
+            self._estimated_paragraph_height_mm(previous)
+            if has_caption and previous and previous.style.name.startswith("Heading")
+            else 0.0
+        )
+        first_capacity = page_height - 5.0 - (10.0 if has_caption else 0.0) - heading_height
+        later_capacity = page_height - 5.0 - 8.0
+        return max(30.0, first_capacity), max(30.0, later_capacity)
+
+    def _paginate_table_rows(
+        self,
+        rows: list[list[Any]],
+        column_widths: list[float],
+        first_capacity: float,
+        later_capacity: float,
+    ) -> list[list[list[Any]]]:
+        header_height = self._estimated_row_height(rows[0], column_widths) if rows else 0
         pages: list[list[list[Any]]] = []
         current: list[list[Any]] = []
         capacity = max(30, first_capacity - header_height)
         used = 0.0
-        for row in data_rows[1:]:
-            height = self._estimated_row_height(row, column_count)
-            if height > 220:
+        for row in rows[1:]:
+            height = self._estimated_row_height(row, column_widths)
+            if height + header_height > later_capacity:
                 raise ConversionError("Одна строка таблицы слишком высокая для страницы. Разбейте её содержимое на несколько строк.")
             if current and used + height > capacity:
                 pages.append(current)
                 current = []
                 capacity = max(30, later_capacity - header_height)
                 used = 0.0
+            if not current and height > capacity:
+                raise ConversionError("Одна строка таблицы слишком высокая для страницы. Разбейте её содержимое на несколько строк.")
             current.append(row)
             used += height
         if current or not pages:
@@ -795,15 +1129,16 @@ class DocxRenderer:
         paragraph.paragraph_format.keep_with_next = True
         _style_run(paragraph.add_run(f"Продолжение таблицы {number}"))
 
-    def _add_table_rows(self, rows: list[list[Any]], column_count: int):
+    def _add_table_rows(self, rows: list[list[Any]], column_widths: list[float]):
         if not rows:
             return
+        column_count = len(column_widths)
         table = self.document.add_table(rows=0, cols=column_count)
         table.autofit = False
         table.alignment = WD_TABLE_ALIGNMENT.LEFT
-        width = Emu(int(self.content_width / column_count))
-        for column in table.columns:
-            column.width = width
+        widths = [Emu(int(width_mm * 36_000)) for width_mm in column_widths]
+        for column_index, column in enumerate(table.columns):
+            column.width = widths[column_index]
         _set_table_borders(table)
 
         for row_index, row_tokens in enumerate(rows):
@@ -813,7 +1148,7 @@ class DocxRenderer:
                 _mark_repeat_header(row)
             for cell_index, inline in enumerate(row_tokens):
                 cell = row.cells[cell_index]
-                cell.width = width
+                cell.width = widths[cell_index]
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 paragraph = cell.paragraphs[0]
                 self._format_paragraph(paragraph, first_line=0, cell=True)
@@ -827,17 +1162,18 @@ class DocxRenderer:
         cols = max((len(row) for row in rows), default=0)
         if not cols:
             return
-        estimated_total = sum(self._estimated_row_height(row, cols) for row in rows)
-        segment_threshold = 155.0
-        if estimated_total <= segment_threshold:
+        column_widths = self._table_column_widths(rows, cols)
+        previous_paragraphs = self.document.paragraphs
+        previous = previous_paragraphs[-1] if previous_paragraphs else None
+        first_capacity, later_capacity = self._table_page_capacities(previous, bool(caption))
+        estimated_total = sum(self._estimated_row_height(row, column_widths) for row in rows)
+        if estimated_total <= first_capacity:
             if caption:
                 self._add_caption(caption, table=True)
-            self._add_table_rows(rows, cols)
+            self._add_table_rows(rows, column_widths)
             return
 
         if caption:
-            previous_paragraphs = self.document.paragraphs
-            previous = previous_paragraphs[-1] if previous_paragraphs else None
             page_break_before = False
             if previous and previous.style.name.startswith("Heading"):
                 if len(previous_paragraphs) > 1:
@@ -847,35 +1183,60 @@ class DocxRenderer:
             self._add_caption(caption, table=True, page_break_before=page_break_before)
         else:
             self.document.add_page_break()
-        pages = self._paginate_table_rows(rows, cols, first_capacity=175.0, later_capacity=165.0)
+        pages = self._paginate_table_rows(rows, column_widths, first_capacity, later_capacity)
         for page_index, data_rows in enumerate(pages):
             if page_index:
                 self.document.add_page_break()
                 if caption:
                     self._add_continuation_label(caption[0])
-            self._add_table_rows([rows[0], *data_rows], cols)
+            self._add_table_rows([rows[0], *data_rows], column_widths)
 
     def add_image_paragraph(self, inline):
         return self.add_paragraph(inline, alignment=WD_ALIGN_PARAGRAPH.CENTER, first_line=0, keep=True)
 
     def add_list(self, block: Block, depth: int = 0, quote_depth: int = 0):
+        numbering_id = self._new_ordered_list_id(block.start_number, depth, quote_depth) if block.ordered else None
         for item_index, item in enumerate(block.children or []):
             item_blocks = item.children or []
             for child_index, child in enumerate(item_blocks):
                 if child.kind == "paragraph":
                     style_name = "List Number" if block.ordered else "List Bullet"
                     paragraph = self.document.add_paragraph(style=style_name)
-                    paragraph.paragraph_format.left_indent = Mm(7 + depth * 7 + quote_depth * 7)
+                    paragraph.paragraph_format.left_indent = Mm(7 + depth * 7 + quote_depth * 10)
                     paragraph.paragraph_format.first_line_indent = Mm(-4)
                     paragraph.paragraph_format.line_spacing = 1.5
                     paragraph.paragraph_format.space_after = Pt(0)
-                    self._append_inline(paragraph, child.value)
+                    paragraph.paragraph_format.right_indent = Mm(8 if quote_depth else 0)
+                    if numbering_id is not None:
+                        self._set_paragraph_numbering(paragraph, numbering_id)
+                    if quote_depth:
+                        self._apply_quote_border(paragraph)
+                    task_prefix = None
+                    task_match = None
+                    if child.value and child.value.children:
+                        first_text = next((part for part in child.value.children if part.type == "text"), None)
+                        task_match = re.match(r"^(\s*\[([ xX])\]\s+)", first_text.content) if first_text else None
+                    if task_match:
+                        task_prefix = task_match.group(1)
+                        checkbox = paragraph.add_run("☑ " if task_match.group(2).strip() else "☐ ")
+                        _style_run(checkbox)
+                        checkbox.font.name = "Segoe UI Symbol"
+                        checkbox._element.rPr.rFonts.set(qn("w:eastAsia"), "Segoe UI Symbol")
+                        checkbox._element.rPr.rFonts.set(qn("w:cs"), "Segoe UI Symbol")
+                    self._append_inline(paragraph, child.value, omit_text_prefix=task_prefix)
                 else:
                     self.add_block(child, quote_depth=quote_depth, list_depth=depth + 1)
 
     def add_block(self, block: Block, *, quote_depth: int = 0, list_depth: int = 0):
         if block.kind == "heading":
             paragraph = self.document.add_paragraph(style=f"Heading {max(1, min(6, block.level))}")
+            if quote_depth:
+                paragraph.paragraph_format.left_indent = (paragraph.paragraph_format.left_indent or Mm(0)) + Mm(quote_depth * 10)
+                paragraph.paragraph_format.first_line_indent = Mm(0)
+                paragraph.paragraph_format.right_indent = Mm(8)
+                paragraph.paragraph_format.space_before = Pt(4)
+                paragraph.paragraph_format.space_after = Pt(4)
+                self._apply_quote_border(paragraph)
             self._append_inline(paragraph, block.value, size=[20, 18, 16, 14, 13, 12][max(0, min(5, block.level - 1))], bold=True)
         elif block.kind == "paragraph":
             if block.value and _plain_inline(block.value).strip() == PAGEBREAK_MARKER:
@@ -893,10 +1254,7 @@ class DocxRenderer:
             self.add_list(block, list_depth, quote_depth)
         elif block.kind == "quote":
             for child in block.children or []:
-                if child.kind == "paragraph":
-                    self.add_paragraph(child.value, quote_depth=quote_depth + 1)
-                else:
-                    self.add_block(child, quote_depth=quote_depth + 1)
+                self.add_block(child, quote_depth=quote_depth + 1)
         elif block.kind == "code":
             text = block.value.content.rstrip("\n")
             for line in text.split("\n") or [""]:
@@ -919,7 +1277,8 @@ class DocxRenderer:
     def render(self, markdown: str) -> bytes:
         prepared = PAGEBREAK_DIRECTIVE.sub(PAGEBREAK_MARKER, markdown)
         # Reparse the prepared source so the explicit page-break directive remains a recognizable block.
-        parser = MarkdownIt("commonmark", {"html": False}).enable("table")
+        prepared = _normalize_pandoc_simple_tables(prepared)
+        parser = _markdown_parser()
         blocks = _parse_blocks(parser.parse(prepared))
         _tag_block_captions(blocks)
         i = 0

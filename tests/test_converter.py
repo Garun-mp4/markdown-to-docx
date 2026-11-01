@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 from PIL import Image
 
@@ -45,6 +46,151 @@ def test_page_profile_headings_and_page_break():
     assert document.styles["Heading 6"].font.size == Pt(12)
     assert abs(document.styles["Heading 6"].paragraph_format.left_indent - Mm(25)) < 500
     assert any("w:type=\"page\"" in p._p.xml for p in document.paragraphs)
+    for level in range(1, 7):
+        color = document.styles[f"Heading {level}"].font.color
+        assert color is not None and str(color.rgb) == "000000"
+
+
+def test_soft_markdown_breaks_flow_and_hard_breaks_remain_explicit():
+    content = build_docx(
+        "First source line\ncontinues in the same paragraph.\n\nHard line  \nbreak stays explicit.",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    assert document.paragraphs[0].text == "First source line continues in the same paragraph."
+    assert document.paragraphs[1].text == "Hard line\nbreak stays explicit."
+
+
+def test_markdown_ordered_lists_restart_and_honor_start_number():
+    content = build_docx(
+        "3. First item\n4. Second item\n\nA paragraph between lists.\n\n1. New list\n2. Next item",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    items = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "List Number"]
+    number_ids = [
+        paragraph._p.pPr.find(qn("w:numPr")).find(qn("w:numId")).get(qn("w:val"))
+        for paragraph in items
+    ]
+    assert number_ids[0] == number_ids[1]
+    assert number_ids[2] == number_ids[3]
+    assert number_ids[0] != number_ids[2]
+    first_number = next(
+        node for node in document.part.numbering_part.element.findall(qn("w:num"))
+        if node.get(qn("w:numId")) == number_ids[0]
+    )
+    override = first_number.find(qn("w:lvlOverride"))
+    assert override is not None
+    assert override.find(qn("w:startOverride")).get(qn("w:val")) == "3"
+
+
+def test_nested_ordered_lists_keep_their_level_and_numbering_sequence():
+    content = build_docx(
+        "- Outer item\n  1. Nested first\n  2. Nested second\n- Next outer item",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    bullets = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "List Bullet"]
+    numbers = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "List Number"]
+    assert [paragraph.text for paragraph in bullets] == ["Outer item", "Next outer item"]
+    assert [paragraph.text for paragraph in numbers] == ["Nested first", "Nested second"]
+    assert numbers[0].paragraph_format.left_indent > bullets[0].paragraph_format.left_indent
+    number_ids = [
+        paragraph._p.pPr.find(qn("w:numPr")).find(qn("w:numId")).get(qn("w:val"))
+        for paragraph in numbers
+    ]
+    assert number_ids[0] == number_ids[1]
+
+
+def test_blockquotes_have_indentation_and_a_visible_academic_rule():
+    content = build_docx(
+        "> A quoted statement.\n>\n> A second paragraph with **emphasis**.",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    quotes = [paragraph for paragraph in document.paragraphs if "w:left" in paragraph._p.xml]
+    assert len(quotes) == 2
+    assert all(paragraph.paragraph_format.left_indent > Mm(0) for paragraph in quotes)
+    assert all(paragraph.paragraph_format.first_line_indent == Mm(0) for paragraph in quotes)
+    assert any(run.bold for run in quotes[1].runs)
+
+
+def test_gfm_strikethrough_and_task_lists_are_preserved():
+    content = build_docx(
+        "- [x] Completed ~~old task~~\n- [ ] Pending task",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    items = [paragraph for paragraph in document.paragraphs if paragraph.style.name == "List Bullet"]
+    assert items[0].text == "☑ Completed old task"
+    assert items[1].text == "☐ Pending task"
+    struck = next(run for run in items[0].runs if run.text == "old task")
+    assert struck.font.strike
+
+
+def test_pandoc_simple_table_is_converted_without_turning_horizontal_rules_into_tables():
+    markdown = (
+        "  -----------------------------\n"
+        "  Name       Value\n"
+        "  ---------- ----------\n"
+        "  First      one\n"
+        "             continues\n\n"
+        "  Second     three\n"
+        "  -----------------------------\n\n"
+        "After the table.\n\n---\n\nAfter the rule."
+    )
+    content = build_docx(
+        markdown,
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    assert len(document.tables) == 1
+    table = document.tables[0]
+    assert len(table.rows) == 3
+    assert [cell.text for cell in table.rows[1].cells] == ["First", "one continues"]
+    assert [cell.text for cell in table.rows[2].cells] == ["Second", "three"]
+    assert "After the table." in [paragraph.text for paragraph in document.paragraphs]
+    assert "After the rule." in [paragraph.text for paragraph in document.paragraphs]
+
+
+def test_medium_table_uses_page_space_without_an_early_manual_split():
+    data_rows = "\n".join(f"| Item {index} | Value {index} |" for index in range(1, 23))
+    content = build_docx(
+        "Таблица 4 — 22 строки\n\n| Имя | Значение |\n|---|---|\n" + data_rows,
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    assert len(document.tables) == 1
+    assert len(document.tables[0].rows) == 23
+    assert not any(paragraph.text == "Продолжение таблицы 4" for paragraph in document.paragraphs)
 
 
 def test_long_table_is_split_with_repeated_headers_and_continuation_caption():
@@ -64,6 +210,36 @@ def test_long_table_is_split_with_repeated_headers_and_continuation_caption():
     assert "Таблица 7 — Результаты" in "\n".join(p.text for p in document.paragraphs)
     assert "Продолжение таблицы 7" in "\n".join(p.text for p in document.paragraphs)
     assert not document.paragraphs[0].paragraph_format.page_break_before
+
+
+def test_table_widths_follow_content_instead_of_equal_columns():
+    content = build_docx(
+        "| ID | Name | Description |\n|---|---|---|\n"
+        "| 1 | A | A substantially longer description that needs more room. |\n"
+        "| 2 | B | Another long description that should expand its column. |",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    table = document.tables[0]
+    assert table.columns[2].width > table.columns[0].width
+
+
+def test_table_column_reserves_room_for_long_unbroken_words():
+    content = build_docx(
+        "| Приём | Суть | Условия |\n|---|---|---|\n"
+        "| Психографическое позиционирование | Связать продукт с типом личности | Учитывать реальные ожидания аудитории |",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    assert document.tables[0].columns[0].width >= Mm(35)
 
 
 def test_large_table_keeps_its_section_heading_with_the_table():
