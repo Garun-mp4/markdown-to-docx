@@ -31,10 +31,12 @@ MAX_REQUEST_BYTES = 200 * 1024 * 1024
 MAX_ARCHIVE_UNPACKED = MAX_REQUEST_BYTES
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = MAX_REQUEST_BYTES
+MAX_IMAGE_PIXELS = 60_000_000
+MAX_SANITIZED_IMAGE_PIXELS = 20_000_000
 MAX_REMOTE_REDIRECTS = 3
 IMAGE_FORMATS = {"PNG", "JPEG", "GIF", "BMP", "TIFF", "WEBP"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
-Image.MAX_IMAGE_PIXELS = 20_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 PAGEBREAK_MARKER = "DOCX_PAGEBREAK_4cf49205"
 TABLE_CAPTION = re.compile(r"^\s*Таблица\s+([\w.-]+)\s*[—\-:]\s*(\S.*)\s*$", re.IGNORECASE)
 FIGURE_CAPTION = re.compile(r"^\s*Рисунок\s+([\w.-]+)\s*[—\-:]\s*(\S.*)\s*$", re.IGNORECASE)
@@ -483,12 +485,24 @@ def _sanitize_image(data: bytes, src: str) -> bytes:
             with Image.open(io.BytesIO(data)) as image:
                 if image.format not in IMAGE_FORMATS:
                     raise ConversionError(f"Формат изображения {src} не поддерживается.")
+                image_format = image.format
                 dpi = image.info.get("dpi", (96, 96))
                 image.seek(0)
+                pixel_count = image.width * image.height
+                if pixel_count > MAX_SANITIZED_IMAGE_PIXELS:
+                    scale = (MAX_SANITIZED_IMAGE_PIXELS / pixel_count) ** 0.5
+                    target_size = (
+                        max(1, int(image.width * scale)),
+                        max(1, int(image.height * scale)),
+                    )
+                    image.thumbnail(target_size, Image.Resampling.LANCZOS)
                 image.load()
                 image = image.convert("RGBA") if "A" in image.getbands() else image.convert("RGB")
                 output = io.BytesIO()
-                image.save(output, format="PNG", optimize=True, dpi=dpi)
+                if image_format == "JPEG":
+                    image.save(output, format="JPEG", quality=90, optimize=True, dpi=dpi)
+                else:
+                    image.save(output, format="PNG", optimize=True, dpi=dpi)
                 sanitized = output.getvalue()
                 if len(sanitized) > MAX_IMAGE_BYTES:
                     raise ConversionError(f"Обработанное изображение {src} превышает лимит 30 МБ.")
@@ -496,7 +510,9 @@ def _sanitize_image(data: bytes, src: str) -> bytes:
     except UnidentifiedImageError as exc:
         raise ConversionError(f"Файл по ссылке {src} не является поддерживаемым изображением.") from exc
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ConversionError(f"Размер изображения {src} слишком велик для безопасной обработки.") from exc
+        raise ConversionError(
+            f"Разрешение изображения {src} превышает безопасный предел {MAX_IMAGE_PIXELS // 1_000_000} Мп."
+        ) from exc
     except OSError as exc:
         raise ConversionError(f"Не удалось обработать изображение {src}.") from exc
 

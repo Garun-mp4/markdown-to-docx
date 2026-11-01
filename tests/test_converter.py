@@ -19,6 +19,7 @@ from converter import (
     MAX_ARCHIVE_UNPACKED,
     MAX_IMAGE_BYTES,
     MAX_REQUEST_BYTES,
+    MAX_SANITIZED_IMAGE_PIXELS,
     MAX_TOTAL_IMAGE_BYTES,
     Asset,
     ConversionError,
@@ -66,6 +67,27 @@ def test_individual_resource_respects_the_per_image_size_limit(monkeypatch):
 
     with pytest.raises(ConversionError, match="превышает лимит 30 МБ"):
         collect_project(source, [oversized_image], "")
+
+
+def test_large_jpeg_is_downsampled_safely_before_sanitizing():
+    original = io.BytesIO()
+    Image.new("RGB", (7000, 6000), (80, 120, 60)).save(original, format="JPEG", quality=90)
+
+    sanitized = converter._sanitize_image(original.getvalue(), "large-photo.jpg")
+
+    with Image.open(io.BytesIO(sanitized)) as image:
+        assert image.format == "JPEG"
+        assert image.width * image.height <= MAX_SANITIZED_IMAGE_PIXELS
+
+    document = Document(io.BytesIO(build_docx(
+        "![Photo](large-photo.jpg)",
+        {"large-photo.jpg": sanitized},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )))
+    assert len(document.inline_shapes) == 1
 
 
 def test_project_and_resource_zips_share_the_unpacked_size_budget(monkeypatch):
