@@ -6,84 +6,203 @@
     <meta name="description" content="Преобразование Markdown в оформленный документ DOCX">
     <title>Markdown → DOCX</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script id="default-profile" type="application/json">{{ default_profile|tojson }}</script>
     <script src="{{ url_for('static', filename='app.js') }}" defer></script>
   </head>
   <body>
     <main class="page">
       <header class="page-header">
-        <p class="eyebrow">Учебные и отчётные документы</p>
-        <h1>Markdown → DOCX</h1>
-        <p class="intro">Загрузите Markdown-файл, задайте колонтитулы и получите редактируемый документ Word.</p>
+        <p class="eyebrow">Редактор академических документов</p>
+        <h1>Markdown <span aria-hidden="true">→</span> DOCX</h1>
+        <p class="intro">Загрузите текст и ресурсы, настройте оформление и получите редактируемый документ Word.</p>
       </header>
 
       <form id="convert-form" novalidate>
         <section class="form-section" aria-labelledby="source-heading">
-          <h2 id="source-heading">1. Исходный файл</h2>
-          <label for="source">Markdown-файл или ZIP-архив проекта</label>
-          <input id="source" name="source" type="file" accept=".md,.zip" required>
-          <p class="help">В ZIP можно поместить Markdown и изображения с сохранением папок.</p>
-          <p class="help">Лимит запроса — 50 МБ; изображений — до 10 МБ каждое и до 30 МБ суммарно.</p>
-          <p id="source-name" class="file-name" aria-live="polite"></p>
+          <div class="section-heading">
+            <span class="section-number" aria-hidden="true">01</span>
+            <div>
+              <h2 id="source-heading">Исходный файл</h2>
+              <p>Markdown-документ или ZIP-проект с сохранёнными папками.</p>
+            </div>
+          </div>
 
-          <label for="assets">Отдельный ZIP с изображениями <span class="optional">необязательно</span></label>
-          <input id="assets" name="assets" type="file" accept=".zip">
-          <p class="help">Используйте его, если загружаете отдельный Markdown-файл.</p>
+          <label id="source-dropzone" class="dropzone" for="source">
+            <input id="source" name="source" type="file" accept=".md,.zip" required aria-describedby="source-help source-error">
+            <span class="dropzone-content">
+              <span class="dropzone-mark" aria-hidden="true">
+                <svg viewBox="0 0 48 48" fill="none">
+                  <path d="M13 5.5h15l8 8V42.5H13V5.5Z" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M28 5.5v9h8M19 23h11M19 29h11M19 35h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+              </span>
+              <span class="dropzone-title">Перетащите файл сюда</span>
+              <span class="dropzone-caption">или выберите на устройстве · .md, .zip</span>
+              <span class="dropzone-action" aria-hidden="true">Выбрать файл</span>
+            </span>
+          </label>
+          <p id="source-help" class="help">Markdown в кодировке UTF-8; максимум 5 МБ. ZIP-проект — до 50 МБ.</p>
+          <p id="source-name" class="selected-file" aria-live="polite"></p>
+          <p id="source-error" class="field-error" role="alert" hidden></p>
+
           <div id="markdown-choice" class="choice-panel" hidden>
-            <label for="main-path">В архиве несколько Markdown-файлов. Выберите основной</label>
+            <label for="main-path">В архиве несколько Markdown-файлов. Выберите основной:</label>
             <select id="main-path" name="main_path"></select>
           </div>
         </section>
 
-        <section class="form-section" aria-labelledby="headers-heading">
-          <h2 id="headers-heading">2. Колонтитулы</h2>
-          <div class="field-grid">
-            <fieldset>
-              <legend>Верхний колонтитул</legend>
-              <label for="header-mode">Содержимое</label>
-              <select id="header-mode" name="header_mode">
-                <option value="none">Не использовать</option>
-                <option value="text">Текст</option>
-                <option value="page">Номер страницы</option>
-              </select>
-              <label for="header-text" class="visually-hidden">Текст верхнего колонтитула</label>
-              <input id="header-text" name="header_text" type="text" maxlength="240" placeholder="Например, название работы" hidden>
-            </fieldset>
-            <fieldset>
-              <legend>Нижний колонтитул</legend>
-              <label for="footer-mode">Содержимое</label>
-              <select id="footer-mode" name="footer_mode">
-                <option value="none">Не использовать</option>
-                <option value="text">Текст</option>
-                <option value="page">Номер страницы</option>
-              </select>
-              <label for="footer-text" class="visually-hidden">Текст нижнего колонтитула</label>
-              <input id="footer-text" name="footer_text" type="text" maxlength="240" placeholder="Например, Фамилия И. О." hidden>
-            </fieldset>
+        <section id="assets-section" class="form-section" aria-labelledby="assets-heading">
+          <div class="section-heading">
+            <span class="section-number" aria-hidden="true">02</span>
+            <div>
+              <h2 id="assets-heading">Изображения <span class="optional">необязательно</span></h2>
+              <p>Добавьте файлы или папку, если на них ссылается Markdown.</p>
+            </div>
           </div>
-          <p class="help">Текст можно указать в одном колонтитуле, а автоматическую нумерацию — в другом.</p>
+
+          <div id="assets-dropzone" class="assets-dropzone" role="group" aria-describedby="assets-help assets-error">
+            <span class="assets-icon" aria-hidden="true">
+              <svg viewBox="0 0 48 48" fill="none">
+                <path d="M8 14.5h12l3.5 4H40v21H8v-25Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M13 34l7-7 5 5 4-4 7 6M30 14V6m0 0-4 4m4-4 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="31" cy="24" r="2" fill="currentColor"/>
+              </svg>
+            </span>
+            <div class="assets-copy">
+              <strong>Перетащите изображения или папку сюда</strong>
+              <span>PNG, JPEG, GIF, BMP, TIFF, WEBP · до 10 МБ на изображение</span>
+            </div>
+            <div class="assets-actions" aria-label="Способы добавить ресурсы">
+              <button id="choose-assets" class="button button-secondary" type="button">Выбрать изображения</button>
+              <button id="choose-folder" class="button button-secondary" type="button">Выбрать папку</button>
+              <button id="choose-assets-zip" class="button button-quiet" type="button">Добавить ZIP</button>
+            </div>
+          </div>
+          <input id="asset-files" class="visually-hidden" type="file" accept=".png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff,.webp" multiple tabindex="-1" aria-label="Выбрать изображения">
+          <input id="asset-folder" class="visually-hidden" type="file" accept=".png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff,.webp" webkitdirectory directory multiple tabindex="-1" aria-label="Выбрать папку с изображениями">
+          <input id="asset-zip" class="visually-hidden" type="file" accept=".zip" tabindex="-1" aria-label="Выбрать ZIP-архив ресурсов">
+          <p id="assets-help" class="help">Общий лимит изображений — 30 МБ. Файлы из ZIP-проекта уже подключены; при необходимости сюда можно добавить ещё.</p>
+          <p id="assets-error" class="field-error" role="alert" hidden></p>
+          <ul id="asset-list" class="asset-list" aria-live="polite" aria-label="Прикреплённые ресурсы"></ul>
+
+          <div id="resolution" class="resolution" aria-live="polite" hidden></div>
+        </section>
+
+        <section class="form-section" aria-labelledby="headers-heading">
+          <div class="section-heading">
+            <span class="section-number" aria-hidden="true">03</span>
+            <div>
+              <h2 id="headers-heading">Колонтитулы</h2>
+              <p>Настройте верхнюю и нижнюю часть страницы в предпросмотре.</p>
+            </div>
+          </div>
+
+          <div class="constructor-layout">
+            <div class="paper-stage">
+              <div class="paper-preview" aria-label="Предпросмотр листа A4">
+                <button id="preview-header-target" class="paper-header" type="button" aria-label="Настроить верхний колонтитул">
+                  <span class="paper-region-label">Верхний колонтитул</span>
+                  <span id="header-preview" class="paper-region-value">Пусто</span>
+                </button>
+                <div class="paper-body" aria-hidden="true">
+                  <span class="paper-heading-line"></span>
+                  <span></span><span></span><span></span><span></span>
+                  <span class="paper-short-line"></span>
+                  <span></span><span></span><span class="paper-medium-line"></span>
+                </div>
+                <button id="preview-footer-target" class="paper-footer" type="button" aria-label="Настроить нижний колонтитул">
+                  <span class="paper-region-label">Нижний колонтитул</span>
+                  <span id="footer-preview" class="paper-region-value">Пусто</span>
+                </button>
+              </div>
+              <p class="paper-note">Лист A4 · схематичный предпросмотр</p>
+            </div>
+
+            <div class="constructor-controls">
+              <fieldset class="control-card">
+                <legend>Верхний колонтитул</legend>
+                <label for="header-mode">Содержимое</label>
+                <select id="header-mode" name="header_mode">
+                  <option value="none">Пусто</option>
+                  <option value="text">Текст</option>
+                  <option value="page">Номер страницы</option>
+                </select>
+                <label for="header-text" class="visually-hidden">Текст верхнего колонтитула</label>
+                <input id="header-text" name="header_text" type="text" maxlength="240" placeholder="Например, название работы" hidden>
+              </fieldset>
+
+              <fieldset class="control-card">
+                <legend>Нижний колонтитул</legend>
+                <label for="footer-mode">Содержимое</label>
+                <select id="footer-mode" name="footer_mode">
+                  <option value="none">Пусто</option>
+                  <option value="text">Текст</option>
+                  <option value="page">Номер страницы</option>
+                </select>
+                <label for="footer-text" class="visually-hidden">Текст нижнего колонтитула</label>
+                <input id="footer-text" name="footer_text" type="text" maxlength="240" placeholder="Например, Фамилия И. О." hidden>
+              </fieldset>
+
+              <fieldset id="numbering-controls" class="control-card numbering-controls">
+                <legend>Параметры нумерации</legend>
+                <label for="numbering-start-page">Показывать номер начиная с листа</label>
+                <input id="numbering-start-page" name="numbering_start_page" type="number" min="1" max="1000" step="1" value="1">
+                <label for="numbering-mode">Номер на первом отображаемом листе</label>
+                <select id="numbering-mode" name="numbering_mode">
+                  <option value="continue">По порядку листа в документе</option>
+                  <option value="restart">Начать с 1</option>
+                </select>
+                <p class="help">Например, на листе 4 можно показать «4» или начать с «1». На предыдущих листах номер будет скрыт.</p>
+              </fieldset>
+              <p id="headers-error" class="field-error" role="alert" hidden></p>
+            </div>
+          </div>
         </section>
 
         <section class="form-section" aria-labelledby="profile-heading">
-          <h2 id="profile-heading">3. Профиль оформления</h2>
-          <p>Единый академический профиль MVP: формат A4, Times New Roman, таблицы и подписи по заданным правилам.</p>
-          <details>
-            <summary>Кратко о настройках</summary>
-            <ul>
-              <li>Основной текст — 12 pt, интервал 1,5, отступ первой строки 12,5 мм.</li>
-              <li>Заголовки H1–H6 — от 20 до 12 pt, полужирные.</li>
-              <li>Поля страницы: слева 30 мм, справа 15 мм, сверху и снизу 20 мм.</li>
-            </ul>
-          </details>
+          <div class="section-heading">
+            <span class="section-number" aria-hidden="true">04</span>
+            <div>
+              <h2 id="profile-heading">Профиль оформления</h2>
+              <p>Измените любой параметр. Сброс вернёт исходные академические настройки.</p>
+            </div>
+          </div>
+
+          <div id="profile-controls" class="profile-groups"></div>
+          <p id="profile-error" class="field-error" role="alert" hidden></p>
+          <button id="reset-profile" class="button button-secondary profile-reset" type="button">Вернуть значения по умолчанию</button>
         </section>
 
-        <section id="resolution" class="resolution" aria-live="polite" hidden></section>
         <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
-        <button id="convert-button" type="submit">Преобразовать и скачать DOCX</button>
+        <button id="convert-button" class="button button-primary submit-button" type="submit">Преобразовать в DOCX</button>
       </form>
 
+      <section id="result" class="result-panel" aria-live="polite" hidden>
+        <div>
+          <p class="result-title">Документ готов</p>
+          <p id="result-filename" class="result-filename"></p>
+        </div>
+        <div class="result-actions">
+          <a id="download-link" class="button button-primary" download>Скачать DOCX</a>
+          <button id="new-file-button" class="button button-secondary" type="button">Новый файл</button>
+        </div>
+      </section>
+
       <footer class="page-footer">
-        <p>Файлы обрабатываются для создания документа и не сохраняются после ответа.</p>
+        <p>Файлы обрабатываются только для создания DOCX и не сохраняются после ответа.</p>
       </footer>
     </main>
+
+    <dialog id="images-dialog" class="images-dialog" aria-labelledby="images-dialog-title" aria-describedby="images-dialog-description">
+      <form method="dialog">
+        <p class="eyebrow">Ресурсы Markdown</p>
+        <h2 id="images-dialog-title">В документе есть изображения?</h2>
+        <p id="images-dialog-description">Выберите папку с изображениями, чтобы приложение сопоставило её содержимое со ссылками в тексте. Отдельные файлы можно добавить здесь ниже или позже.</p>
+        <div class="dialog-actions">
+          <button id="images-no" class="button button-secondary" type="button">Нет, продолжить</button>
+          <button id="images-yes" class="button button-primary" type="button">Да, добавить</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

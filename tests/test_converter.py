@@ -11,6 +11,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 from PIL import Image
+from werkzeug.datastructures import MultiDict
 
 from app import app
 from converter import (
@@ -22,6 +23,7 @@ from converter import (
     collect_project,
     prepare_images,
 )
+from docx_profile import ProfileValidationError, default_profile, validate_profile
 
 
 def png_bytes(color=(20, 50, 90)):
@@ -49,6 +51,107 @@ def test_page_profile_headings_and_page_break():
     for level in range(1, 7):
         color = document.styles[f"Heading {level}"].font.color
         assert color is not None and str(color.rgb) == "000000"
+
+
+def test_custom_profile_is_validated_and_applied_across_document_elements():
+    profile = default_profile()
+    profile["page"]["width_mm"] = 200
+    profile["page"]["left_margin_mm"] = 25
+    profile["body"].update(font_family="Arial", font_size_pt=13, alignment="justify", first_line_indent_mm=9)
+    profile["headings"][0].update(font_family="Georgia", font_size_pt=24, color="#223344", italic=True)
+    profile["quotes"]["left_indent_mm"] = 14
+    profile["lists"]["left_indent_mm"] = 12
+    profile["tables"].update(
+        header_font_family="Arial",
+        header_font_size_pt=11,
+        header_color="#112233",
+        header_alignment="left",
+        border_color="#445566",
+        border_width_pt=1,
+        alignment="center",
+    )
+    document = Document(io.BytesIO(build_docx(
+        "# Heading\n\nBody text.\n\n> Quoted text.\n\n1. Numbered item\n\nТаблица 1 — Данные\n\n| Name | Value |\n|---|---|\n| One | 1 |",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+        profile=profile,
+    )))
+
+    assert abs(document.sections[0].page_width - Mm(200)) < 500
+    assert document.styles["Normal"].font.name == "Arial"
+    assert document.styles["Normal"].font.size == Pt(13)
+    assert document.styles["Normal"].paragraph_format.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+    assert document.styles["Heading 1"].font.name == "Georgia"
+    assert document.styles["Heading 1"].font.size == Pt(24)
+    assert str(document.styles["Heading 1"].font.color.rgb) == "223344"
+    quote = next(paragraph for paragraph in document.paragraphs if paragraph.text == "Quoted text.")
+    numbered_item = next(paragraph for paragraph in document.paragraphs if paragraph.text == "Numbered item")
+    assert abs(quote.paragraph_format.left_indent - Mm(14)) < 500
+    assert abs(numbered_item.paragraph_format.left_indent - Mm(12)) < 500
+    header = document.tables[0].rows[0].cells[0].paragraphs[0]
+    assert header.alignment == WD_ALIGN_PARAGRAPH.LEFT
+    assert header.runs[0].font.name == "Arial"
+    assert str(header.runs[0].font.color.rgb) == "112233"
+    assert "445566" in document.tables[0]._tbl.tblPr.xml
+
+
+def test_profile_validation_rejects_out_of_range_and_unknown_values():
+    profile = default_profile()
+    profile["body"]["font_size_pt"] = 0
+    with pytest.raises(ProfileValidationError, match="от 6 до 72"):
+        validate_profile(profile)
+
+    profile = default_profile()
+    profile["extra"] = True
+    with pytest.raises(ProfileValidationError, match="Неизвестный параметр"):
+        validate_profile(profile)
+
+    profile = default_profile()
+    profile["tables"]["vertical_alignment"] = "justify"
+    with pytest.raises(ProfileValidationError, match="вертикальное выравнивание"):
+        validate_profile(profile)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_result"),
+    [("continue", '" PAGE '), ("restart", " = ")],
+)
+def test_page_number_is_conditional_and_uses_selected_start_page(mode, expected_result):
+    content = build_docx(
+        "Page number test",
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="page",
+        footer_text="",
+        numbering_start_page=4,
+        numbering_mode=mode,
+    )
+    document = Document(io.BytesIO(content))
+    instructions = "".join(
+        node.text or ""
+        for node in document.sections[0].footer._element.iter(qn("w:instrText"))
+    )
+    assert "IF" in instructions
+    assert "PAGE" in instructions
+    assert '>= "4"' in instructions
+    assert expected_result in instructions
+
+
+def test_page_number_rejects_invalid_start_page():
+    with pytest.raises(ConversionError, match="целым числом от 1 до 1000"):
+        build_docx(
+            "Text",
+            {},
+            header_mode="none",
+            header_text="",
+            footer_mode="page",
+            footer_text="",
+            numbering_start_page=0,
+        )
 
 
 def test_soft_markdown_breaks_flow_and_hard_breaks_remain_explicit():
@@ -229,6 +332,30 @@ def test_long_table_is_split_with_repeated_headers_and_continuation_caption():
     assert not document.paragraphs[0].paragraph_format.page_break_before
 
 
+def test_long_captioned_table_uses_remaining_page_before_starting_new_page():
+    data_rows = "\n".join(
+        f"| {index} | Элемент {index} | Строка должна оставаться целой при переносе. |"
+        for index in range(1, 45)
+    )
+    content = build_docx(
+        "# Проверка таблицы\n\nКороткий вводный абзац.\n\n"
+        "Таблица 9 — Использование свободного места\n\n"
+        "| № | Элемент | Проверка |\n|---:|---|---|\n" + data_rows,
+        {},
+        header_mode="none",
+        header_text="",
+        footer_mode="none",
+        footer_text="",
+    )
+    document = Document(io.BytesIO(content))
+    caption = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("Таблица 9"))
+
+    assert len(document.tables) > 1
+    assert not caption.paragraph_format.page_break_before
+    assert len(document.tables[0].rows) > 3
+    assert "Продолжение таблицы 9" in "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+
 def test_table_widths_follow_content_instead_of_equal_columns():
     content = build_docx(
         "| ID | Name | Description |\n|---|---|---|\n"
@@ -351,6 +478,34 @@ def test_relative_asset_paths_can_move_to_a_sibling_folder_without_leaving_archi
     assert result
     with pytest.raises(ConversionError, match="Не найдены изображения"):
         prepare_images("![Plot](../../outside.png)", "docs/report.md", [], {})
+
+
+def test_single_uploaded_image_can_match_a_relative_markdown_link_by_unique_filename():
+    result = prepare_images(
+        "![Plot](images/plot.png)",
+        "report.md",
+        [Asset("resources:0:plot.png", "plot.png", png_bytes())],
+        {},
+    )
+    assert result["images/plot.png"].startswith(b"\x89PNG")
+
+
+def test_relative_basename_collision_requires_an_explicit_resource_choice():
+    assets = [
+        Asset("resources:0:a/plot.png", "a/plot.png", png_bytes()),
+        Asset("resources:1:b/plot.png", "b/plot.png", png_bytes((40, 50, 60))),
+    ]
+    with pytest.raises(SelectionRequired) as error:
+        prepare_images("![Plot](images/plot.png)", "report.md", assets, {})
+    assert error.value.field == "assets"
+    source = "images/plot.png"
+    selected = prepare_images(
+        f"![Plot]({source})",
+        "report.md",
+        assets,
+        {source: "resources:1:b/plot.png"},
+    )
+    assert selected
 
 
 def test_https_image_flow_sanitizes_the_downloaded_file(monkeypatch):
@@ -492,3 +647,57 @@ def test_api_returns_json_error_for_missing_assets():
     )
     assert response.status_code == 400
     assert "Не найдены изображения" in response.json["error"]
+    assert response.json["field"] == "assets"
+
+
+def test_api_accepts_multiple_uploaded_images_with_folder_paths_and_profile():
+    data = MultiDict([
+        ("source", (io.BytesIO(b"![Diagram](images/diagram.png)"), "report.md")),
+        ("assets", (io.BytesIO(png_bytes()), "images/diagram.png")),
+        ("assets", (io.BytesIO(png_bytes((50, 60, 70))), "extra/other.png")),
+        ("profile", json.dumps(default_profile())),
+        ("header_mode", "none"),
+        ("footer_mode", "page"),
+        ("numbering_start_page", "3"),
+        ("numbering_mode", "restart"),
+    ])
+    response = app.test_client().post("/api/convert", data=data, content_type="multipart/form-data")
+
+    assert response.status_code == 200
+    document = Document(io.BytesIO(response.data))
+    assert len(document.inline_shapes) == 1
+    instructions = "".join(
+        node.text or ""
+        for node in document.sections[0].footer._element.iter(qn("w:instrText"))
+    )
+    assert "IF" in instructions
+    assert '>= "3"' in instructions
+    assert " - 2 " in instructions
+
+
+def test_api_reports_invalid_profile_at_the_profile_section():
+    profile = default_profile()
+    profile["page"]["width_mm"] = 10
+    response = app.test_client().post(
+        "/api/convert",
+        data={
+            "source": (io.BytesIO(b"Text"), "report.md"),
+            "profile": json.dumps(profile),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    assert response.json["field"] == "profile"
+    assert "width_mm" in response.json["error"]
+
+
+def test_api_reports_non_image_resource_file_in_the_resource_area():
+    data = MultiDict([
+        ("source", (io.BytesIO(b"Plain document"), "report.md")),
+        ("assets", (io.BytesIO(b"not an image"), "notes.txt")),
+    ])
+    response = app.test_client().post("/api/convert", data=data, content_type="multipart/form-data")
+
+    assert response.status_code == 400
+    assert response.json["field"] == "assets"
+    assert "notes.txt" in response.json["error"]

@@ -19,8 +19,12 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Emu, Inches, Mm, Pt, RGBColor
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph as DocxParagraph
 from markdown_it import MarkdownIt
 from PIL import Image, UnidentifiedImageError
+
+from docx_profile import ProfileValidationError, validate_profile
 
 MAX_ARCHIVE_ENTRIES = 1_500
 MAX_ARCHIVE_UNPACKED = 100 * 1024 * 1024
@@ -28,6 +32,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 30 * 1024 * 1024
 MAX_REMOTE_REDIRECTS = 3
 IMAGE_FORMATS = {"PNG", "JPEG", "GIF", "BMP", "TIFF", "WEBP"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 Image.MAX_IMAGE_PIXELS = 20_000_000
 PAGEBREAK_MARKER = "DOCX_PAGEBREAK_4cf49205"
 TABLE_CAPTION = re.compile(r"^\s*Таблица\s+([\w.-]+)\s*[—\-:]\s*(\S.*)\s*$", re.IGNORECASE)
@@ -39,7 +44,9 @@ WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 class ConversionError(Exception):
-    pass
+    def __init__(self, message: str, field: str = "source"):
+        super().__init__(message)
+        self.field = field
 
 
 class SelectionRequired(Exception):
@@ -47,6 +54,7 @@ class SelectionRequired(Exception):
         super().__init__(message)
         self.message = message
         self.payload = payload
+        self.field = "assets" if payload.get("ambiguous_images") else "source"
 
 
 @dataclass(frozen=True)
@@ -85,23 +93,23 @@ def _normal_archive_path(path: str) -> str | None:
     return "/".join(parts) or None
 
 
-def _zip_assets(upload, label: str) -> tuple[list[Asset], list[tuple[str, bytes]]]:
+def _zip_assets(upload, label: str, field: str = "source") -> tuple[list[Asset], list[tuple[str, bytes]]]:
     if upload is None or not upload.filename:
         return [], []
     if not upload.filename.lower().endswith(".zip"):
-        raise ConversionError("Архив ресурсов должен иметь формат .zip.")
+        raise ConversionError("Здесь принимается ZIP-архив проекта или ресурсов.", field)
 
     raw = upload.read()
     if len(raw) > 50 * 1024 * 1024:
-        raise ConversionError("ZIP-архив превышает лимит 50 МБ.")
+        raise ConversionError("ZIP-архив превышает лимит 50 МБ.", field)
     try:
         archive = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile as exc:
-        raise ConversionError("Не удалось открыть ZIP-архив. Проверьте файл.") from exc
+        raise ConversionError("Не удалось открыть ZIP-архив. Проверьте файл.", field) from exc
 
     infos = archive.infolist()
     if len(infos) > MAX_ARCHIVE_ENTRIES:
-        raise ConversionError("В архиве слишком много файлов (максимум 1500).")
+        raise ConversionError("В архиве слишком много файлов (максимум 1500).", field)
 
     assets: list[Asset] = []
     markdown_files: list[tuple[str, bytes]] = []
@@ -112,19 +120,19 @@ def _zip_assets(upload, label: str) -> tuple[list[Asset], list[tuple[str, bytes]
                 continue
             safe_path = _normal_archive_path(info.filename)
             if safe_path is None:
-                raise ConversionError("В архиве найден небезопасный путь к файлу.")
+                raise ConversionError("В архиве найден небезопасный путь к файлу.", field)
             mode = (info.external_attr >> 16) & 0o170000
             if mode == 0o120000:
-                raise ConversionError("Символические ссылки в ZIP-архивах не поддерживаются.")
+                raise ConversionError("Символические ссылки в ZIP-архивах не поддерживаются.", field)
             total += info.file_size
             if info.file_size < 0 or total > MAX_ARCHIVE_UNPACKED:
-                raise ConversionError("Распакованный архив превышает лимит 100 МБ.")
+                raise ConversionError("Распакованный архив превышает лимит 100 МБ.", field)
             if info.file_size > MAX_IMAGE_BYTES and not safe_path.lower().endswith(".md"):
-                raise ConversionError(f"Файл {PurePosixPath(safe_path).name} превышает лимит 10 МБ.")
+                raise ConversionError(f"Файл {PurePosixPath(safe_path).name} превышает лимит 10 МБ.", field)
             try:
                 data = archive.read(info)
             except (RuntimeError, zipfile.BadZipFile) as exc:
-                raise ConversionError("Не удалось прочитать ZIP-архив.") from exc
+                raise ConversionError("Не удалось прочитать ZIP-архив.", field) from exc
             if safe_path.lower().endswith(".md"):
                 markdown_files.append((safe_path, data))
             else:
@@ -141,7 +149,32 @@ def _decode_markdown(data: bytes) -> str:
         raise ConversionError("Markdown-файл должен быть сохранён в кодировке UTF-8.") from exc
 
 
-def collect_project(source, resources_upload, main_path: str) -> tuple[str, str, str, list[Asset]]:
+def _as_upload_list(uploads) -> list[Any]:
+    if uploads is None:
+        return []
+    if isinstance(uploads, (list, tuple)):
+        return [upload for upload in uploads if upload is not None and upload.filename]
+    return [uploads] if uploads.filename else []
+
+
+def _individual_asset(upload, index: int) -> Asset:
+    raw_name = (upload.filename or "").replace("\\", "/")
+    safe_path = _normal_archive_path(raw_name)
+    if safe_path is None:
+        raise ConversionError("В папке найден небезопасный путь к файлу.", "assets")
+    suffix = PurePosixPath(safe_path).suffix.lower()
+    if suffix not in IMAGE_EXTENSIONS:
+        raise ConversionError(
+            f"Файл {PurePosixPath(safe_path).name} не является поддерживаемым изображением. Добавьте PNG, JPEG, GIF, BMP, TIFF или WEBP.",
+            "assets",
+        )
+    data = upload.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ConversionError(f"Изображение {PurePosixPath(safe_path).name} превышает лимит 10 МБ.", "assets")
+    return Asset(f"resources:{index}:{safe_path}", safe_path, data)
+
+
+def collect_project(source, resources_uploads, main_path: str) -> tuple[str, str, str, list[Asset]]:
     name = source.filename or ""
     if name.lower().endswith(".md"):
         markdown_text = _decode_markdown(source.read())
@@ -170,9 +203,27 @@ def collect_project(source, resources_upload, main_path: str) -> tuple[str, str,
     else:
         raise ConversionError("Загрузите файл .md или ZIP-архив проекта.")
 
-    resource_assets, resource_markdown = _zip_assets(resources_upload, "resources")
+    resource_assets: list[Asset] = []
+    resource_markdown: list[tuple[str, bytes]] = []
+    for index, upload in enumerate(_as_upload_list(resources_uploads)):
+        if upload.filename.lower().endswith(".zip"):
+            assets_from_zip, markdown_from_zip = _zip_assets(upload, f"resources:{index}", "assets")
+            unsupported = [
+                PurePosixPath(asset.archive_path).name
+                for asset in assets_from_zip
+                if PurePosixPath(asset.archive_path).suffix.lower() not in IMAGE_EXTENSIONS
+            ]
+            if unsupported:
+                raise ConversionError(
+                    "В ZIP-архиве ресурсов найдены неподдерживаемые файлы: " + ", ".join(unsupported) + ". Добавьте только изображения.",
+                    "assets",
+                )
+            resource_assets.extend(assets_from_zip)
+            resource_markdown.extend(markdown_from_zip)
+        else:
+            resource_assets.append(_individual_asset(upload, index))
     if resource_markdown:
-        raise ConversionError("В ZIP ресурсов не должно быть Markdown-файлов; загрузите их как основной источник.")
+        raise ConversionError("В ZIP ресурсов не должно быть Markdown-файлов; добавьте их через основную область.", "assets")
     return markdown_text, markdown_name, markdown_path, project_assets + resource_assets
 
 
@@ -468,6 +519,9 @@ def prepare_images(markdown: str, markdown_path: str, assets: list[Asset], choic
             joined = f"{base_dir}/{relative}" if base_dir else relative
             normalized = _normal_archive_path(joined)
             matches = index.get(normalized.casefold(), []) if normalized else []
+            if normalized and not matches:
+                basename = PurePosixPath(relative).name.casefold()
+                matches = [asset for asset in assets if PurePosixPath(asset.archive_path).name.casefold() == basename]
             if not matches:
                 unresolved.append(src)
                 continue
@@ -482,7 +536,8 @@ def prepare_images(markdown: str, markdown_path: str, assets: list[Asset], choic
 
     if unresolved:
         raise ConversionError(
-            "Не найдены изображения: " + ", ".join(unresolved) + ". Добавьте их в ZIP ресурсов и повторите конвертацию."
+            "Не найдены изображения: " + ", ".join(unresolved) + ". Добавьте подходящие файлы в область ресурсов и повторите конвертацию.",
+            "assets",
         )
     return resolved
 
@@ -603,23 +658,48 @@ def _tag_block_captions(blocks: list[Block]) -> None:
                     _tag_block_captions([item])
 
 
-def _style_run(run, *, size=12, bold=False, italic=False, strike=False, code=False, underline=False):
+def _style_run(
+    run,
+    *,
+    size=12,
+    bold=False,
+    italic=False,
+    strike=False,
+    code=False,
+    underline=False,
+    font_family=None,
+    color="#000000",
+    code_background="#EEEEEE",
+):
     run.bold = bold
     run.italic = italic
     run.font.strike = strike
     run.underline = underline
-    run.font.color.rgb = RGBColor(0, 0, 0)
-    run.font.name = "Consolas" if code else "Times New Roman"
-    run.font.size = Pt(10 if code else size)
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Consolas" if code else "Times New Roman")
-    run._element.rPr.rFonts.set(qn("w:cs"), "Consolas" if code else "Times New Roman")
+    run.font.color.rgb = RGBColor.from_string(color.lstrip("#"))
+    selected_font = font_family or ("Consolas" if code else "Times New Roman")
+    run.font.name = selected_font
+    run.font.size = Pt(size)
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), selected_font)
+    run._element.rPr.rFonts.set(qn("w:cs"), selected_font)
     if code:
         shading = OxmlElement("w:shd")
-        shading.set(qn("w:fill"), "EEEEEE")
+        shading.set(qn("w:fill"), code_background.lstrip("#"))
         run._element.get_or_add_rPr().append(shading)
 
 
-def _add_hyperlink(paragraph, text: str, url: str, bold: bool, italic: bool, strike: bool):
+def _add_hyperlink(
+    paragraph,
+    text: str,
+    url: str,
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    *,
+    font_family: str = "Times New Roman",
+    size: float = 12,
+    color: str = "#000000",
+    underline: bool = True,
+):
     relationship_id = paragraph.part.relate_to(
         url,
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
@@ -630,19 +710,20 @@ def _add_hyperlink(paragraph, text: str, url: str, bold: bool, italic: bool, str
     run = OxmlElement("w:r")
     properties = OxmlElement("w:rPr")
     fonts = OxmlElement("w:rFonts")
-    fonts.set(qn("w:ascii"), "Times New Roman")
-    fonts.set(qn("w:hAnsi"), "Times New Roman")
-    fonts.set(qn("w:eastAsia"), "Times New Roman")
+    fonts.set(qn("w:ascii"), font_family)
+    fonts.set(qn("w:hAnsi"), font_family)
+    fonts.set(qn("w:eastAsia"), font_family)
     properties.append(fonts)
-    size = OxmlElement("w:sz")
-    size.set(qn("w:val"), "24")
-    properties.append(size)
-    underline = OxmlElement("w:u")
-    underline.set(qn("w:val"), "single")
-    properties.append(underline)
-    color = OxmlElement("w:color")
-    color.set(qn("w:val"), "000000")
-    properties.append(color)
+    size_node = OxmlElement("w:sz")
+    size_node.set(qn("w:val"), str(round(float(size) * 2)))
+    properties.append(size_node)
+    if underline:
+        underline_node = OxmlElement("w:u")
+        underline_node.set(qn("w:val"), "single")
+        properties.append(underline_node)
+    color_node = OxmlElement("w:color")
+    color_node.set(qn("w:val"), color.lstrip("#"))
+    properties.append(color_node)
     if bold:
         properties.append(OxmlElement("w:b"))
     if italic:
@@ -657,10 +738,32 @@ def _add_hyperlink(paragraph, text: str, url: str, bold: bool, italic: bool, str
     paragraph._p.append(hyperlink)
 
 
+def _alignment(value: str):
+    return {
+        "left": WD_ALIGN_PARAGRAPH.LEFT,
+        "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "right": WD_ALIGN_PARAGRAPH.RIGHT,
+        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+    }[value]
+
+
 class DocxRenderer:
-    def __init__(self, image_data: dict[str, bytes], header_mode: str, header_text: str, footer_mode: str, footer_text: str):
+    def __init__(
+        self,
+        image_data: dict[str, bytes],
+        header_mode: str,
+        header_text: str,
+        footer_mode: str,
+        footer_text: str,
+        profile: dict[str, Any],
+        numbering_start_page: int,
+        numbering_mode: str,
+    ):
         self.document = Document()
         self.image_data = image_data
+        self.profile = profile
+        self.numbering_start_page = numbering_start_page
+        self.numbering_mode = numbering_mode
         self._configure_page()
         self._configure_styles()
         self._configure_field_update()
@@ -668,49 +771,58 @@ class DocxRenderer:
         self.content_width = self.document.sections[0].page_width - self.document.sections[0].left_margin - self.document.sections[0].right_margin
 
     def _configure_page(self):
+        page = self.profile["page"]
         for section in self.document.sections:
-            section.page_width = Mm(210)
-            section.page_height = Mm(297)
-            section.left_margin = Mm(30)
-            section.right_margin = Mm(15)
-            section.top_margin = Mm(20)
-            section.bottom_margin = Mm(20)
-            section.header_distance = Mm(10)
-            section.footer_distance = Mm(10)
+            section.page_width = Mm(page["width_mm"])
+            section.page_height = Mm(page["height_mm"])
+            section.left_margin = Mm(page["left_margin_mm"])
+            section.right_margin = Mm(page["right_margin_mm"])
+            section.top_margin = Mm(page["top_margin_mm"])
+            section.bottom_margin = Mm(page["bottom_margin_mm"])
+            section.header_distance = Mm(page["header_distance_mm"])
+            section.footer_distance = Mm(page["footer_distance_mm"])
 
     def _configure_styles(self):
         styles = self.document.styles
+        body_settings = self.profile["body"]
         normal = styles["Normal"]
-        normal.font.name = "Times New Roman"
-        normal.font.size = Pt(12)
-        normal.font.color.rgb = RGBColor(0, 0, 0)
-        normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
-        normal._element.rPr.rFonts.set(qn("w:cs"), "Times New Roman")
-        normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        normal.paragraph_format.first_line_indent = Mm(12.5)
-        normal.paragraph_format.line_spacing = 1.5
-        normal.paragraph_format.space_before = Pt(0)
-        normal.paragraph_format.space_after = Pt(0)
+        normal.font.name = body_settings["font_family"]
+        normal.font.size = Pt(body_settings["font_size_pt"])
+        normal.font.color.rgb = RGBColor.from_string(body_settings["color"].lstrip("#"))
+        normal._element.rPr.rFonts.set(qn("w:eastAsia"), body_settings["font_family"])
+        normal._element.rPr.rFonts.set(qn("w:cs"), body_settings["font_family"])
+        normal.paragraph_format.alignment = _alignment(body_settings["alignment"])
+        normal.paragraph_format.first_line_indent = Mm(body_settings["first_line_indent_mm"])
+        normal.paragraph_format.line_spacing = body_settings["line_spacing"]
+        normal.paragraph_format.space_before = Pt(body_settings["space_before_pt"])
+        normal.paragraph_format.space_after = Pt(body_settings["space_after_pt"])
         normal.paragraph_format.widow_control = True
 
-        sizes = [20, 18, 16, 14, 13, 12]
-        indents = [0, 5, 10, 15, 20, 25]
-        for level, (size, indent) in enumerate(zip(sizes, indents), start=1):
+        for level, heading_settings in enumerate(self.profile["headings"], start=1):
             style = styles[f"Heading {level}"]
-            style.font.name = "Times New Roman"
-            style.font.size = Pt(size)
-            style.font.bold = True
-            style.font.color.rgb = RGBColor(0, 0, 0)
-            style._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
-            style._element.rPr.rFonts.set(qn("w:cs"), "Times New Roman")
-            style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            style.paragraph_format.left_indent = Mm(indent)
-            style.paragraph_format.first_line_indent = Mm(0)
-            style.paragraph_format.line_spacing = 1.5
-            style.paragraph_format.space_before = Pt(12)
-            style.paragraph_format.space_after = Pt(6)
-            style.paragraph_format.keep_with_next = True
-            style.paragraph_format.keep_together = True
+            style.font.name = heading_settings["font_family"]
+            style.font.size = Pt(heading_settings["font_size_pt"])
+            style.font.bold = heading_settings["bold"]
+            style.font.italic = heading_settings["italic"]
+            style.font.color.rgb = RGBColor.from_string(heading_settings["color"].lstrip("#"))
+            style._element.rPr.rFonts.set(qn("w:eastAsia"), heading_settings["font_family"])
+            style._element.rPr.rFonts.set(qn("w:cs"), heading_settings["font_family"])
+            style.paragraph_format.alignment = _alignment(heading_settings["alignment"])
+            style.paragraph_format.left_indent = Mm(heading_settings["left_indent_mm"])
+            style.paragraph_format.first_line_indent = Mm(heading_settings["first_line_indent_mm"])
+            style.paragraph_format.line_spacing = heading_settings["line_spacing"]
+            style.paragraph_format.space_before = Pt(heading_settings["space_before_pt"])
+            style.paragraph_format.space_after = Pt(heading_settings["space_after_pt"])
+            style.paragraph_format.keep_with_next = heading_settings["keep_with_next"]
+            style.paragraph_format.keep_together = heading_settings["keep_together"]
+
+        for style_name in ("List Bullet", "List Number"):
+            style = styles[style_name]
+            style.font.name = body_settings["font_family"]
+            style.font.size = Pt(body_settings["font_size_pt"])
+            style.font.color.rgb = RGBColor.from_string(body_settings["color"].lstrip("#"))
+            style._element.rPr.rFonts.set(qn("w:eastAsia"), body_settings["font_family"])
+            style._element.rPr.rFonts.set(qn("w:cs"), body_settings["font_family"])
 
     def _configure_field_update(self):
         settings = self.document.settings._element
@@ -721,21 +833,33 @@ class DocxRenderer:
         update.set(qn("w:val"), "true")
 
     def _configure_header_footer(self, header_mode, header_text, footer_mode, footer_text):
+        settings = self.profile["headers_footers"]
         for mode, text, paragraph in (
             (header_mode, header_text, self.document.sections[0].header.paragraphs[0]),
             (footer_mode, footer_text, self.document.sections[0].footer.paragraphs[0]),
         ):
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if mode == "page" else WD_ALIGN_PARAGRAPH.LEFT
+            align_value = settings["page_alignment"] if mode == "page" else settings["text_alignment"]
+            paragraph.alignment = _alignment(align_value)
             paragraph.paragraph_format.first_line_indent = Mm(0)
             paragraph.paragraph_format.line_spacing = 1
             paragraph.paragraph_format.space_after = Pt(0)
             if mode == "text":
-                _style_run(paragraph.add_run(text), size=10)
+                _style_run(
+                    paragraph.add_run(text),
+                    size=settings["font_size_pt"],
+                    font_family=settings["font_family"],
+                    color=settings["color"],
+                )
             elif mode == "page":
-                _append_field(paragraph, "PAGE", "1")
+                _append_conditional_page_number(paragraph, self.numbering_start_page, self.numbering_mode)
+            for run in paragraph.runs:
+                run.font.name = settings["font_family"]
+                run.font.size = Pt(settings["font_size_pt"])
+                run.font.color.rgb = RGBColor.from_string(settings["color"].lstrip("#"))
+                run._element.rPr.rFonts.set(qn("w:eastAsia"), settings["font_family"])
+                run._element.rPr.rFonts.set(qn("w:cs"), settings["font_family"])
 
-    @staticmethod
-    def _apply_quote_border(paragraph):
+    def _apply_quote_border(self, paragraph):
         p_pr = paragraph._p.get_or_add_pPr()
         borders = p_pr.find(qn("w:pBdr"))
         if borders is None:
@@ -746,9 +870,9 @@ class DocxRenderer:
             left = OxmlElement("w:left")
             borders.append(left)
         left.set(qn("w:val"), "single")
-        left.set(qn("w:sz"), "8")
+        left.set(qn("w:sz"), str(round(self.profile["quotes"]["border_width_pt"] * 8)))
         left.set(qn("w:space"), "6")
-        left.set(qn("w:color"), "666666")
+        left.set(qn("w:color"), self.profile["quotes"]["border_color"].lstrip("#"))
 
     def _new_ordered_list_id(self, start_number: int, depth: int, quote_depth: int) -> int:
         numbering = self.document.part.numbering_part.element
@@ -780,13 +904,19 @@ class DocxRenderer:
         tabs = OxmlElement("w:tabs")
         tab = OxmlElement("w:tab")
         tab.set(qn("w:val"), "num")
-        tab_position = 397 + depth * 397 + quote_depth * 567
+        list_settings = self.profile["lists"]
+        left_indent = (
+            list_settings["left_indent_mm"]
+            + depth * list_settings["depth_indent_mm"]
+            + self._quote_left_indent(quote_depth)
+        )
+        tab_position = round(left_indent * 56.6929)
         tab.set(qn("w:pos"), str(tab_position))
         tabs.append(tab)
         paragraph_properties.append(tabs)
         indent = OxmlElement("w:ind")
         indent.set(qn("w:left"), str(tab_position))
-        indent.set(qn("w:hanging"), "227")
+        indent.set(qn("w:hanging"), str(round(list_settings["hanging_indent_mm"] * 56.6929)))
         paragraph_properties.append(indent)
         level.append(paragraph_properties)
         abstract.append(level)
@@ -836,32 +966,66 @@ class DocxRenderer:
             "w:pPrChange",
         )
 
-    def add_paragraph(self, inline, *, alignment=None, indent=0, first_line=12.5, keep=False, size=12, bold=False, italic=False, quote_depth=0, code_block=False, cell=False):
+    def _style_run(self, run, *, size=None, bold=False, italic=False, strike=False, code=False, underline=False, font_family=None, color=None):
+        settings = self.profile["code"] if code else self.profile["body"]
+        _style_run(
+            run,
+            size=size if size is not None else settings["font_size_pt"],
+            bold=bold,
+            italic=italic,
+            strike=strike,
+            code=code,
+            underline=underline,
+            font_family=font_family or settings["font_family"],
+            color=color or settings["color"],
+            code_background=self.profile["code"]["background_color"],
+        )
+
+    def _quote_left_indent(self, quote_depth: int) -> float:
+        if quote_depth <= 0:
+            return 0
+        quote = self.profile["quotes"]
+        return quote["left_indent_mm"] + (quote_depth - 1) * quote["depth_indent_mm"]
+
+    def add_paragraph(self, inline, *, alignment=None, indent=0, first_line=None, keep=False, size=None, bold=False, italic=False, quote_depth=0, code_block=False, cell=False, font_family=None, color=None):
         paragraph = self.document.add_paragraph()
         self._format_paragraph(paragraph, indent=indent, first_line=first_line, keep=keep, quote_depth=quote_depth, cell=cell)
         if alignment is not None:
             paragraph.alignment = alignment
         if code_block:
-            paragraph.paragraph_format.left_indent = Mm(10 + quote_depth * 10)
+            code = self.profile["code"]
+            paragraph.paragraph_format.left_indent = Mm(code["left_indent_mm"] + self._quote_left_indent(quote_depth))
             paragraph.paragraph_format.first_line_indent = Mm(0)
-            paragraph.paragraph_format.line_spacing = 1
-            paragraph.paragraph_format.space_before = Pt(4)
-            paragraph.paragraph_format.space_after = Pt(4)
+            paragraph.paragraph_format.line_spacing = code["line_spacing"]
+            paragraph.paragraph_format.space_before = Pt(code["space_before_pt"])
+            paragraph.paragraph_format.space_after = Pt(code["space_after_pt"])
             p_pr = paragraph._p.get_or_add_pPr()
             shading = OxmlElement("w:shd")
-            shading.set(qn("w:fill"), "F2F2F2")
+            shading.set(qn("w:fill"), code["background_color"].lstrip("#"))
             p_pr.append(shading)
-        self._append_inline(paragraph, inline, size=size, bold=bold, italic=italic, code_block=code_block)
+        self._append_inline(
+            paragraph,
+            inline,
+            size=size,
+            bold=bold,
+            italic=italic,
+            code_block=code_block,
+            font_family=font_family,
+            color=color,
+        )
         return paragraph
 
-    def _format_paragraph(self, paragraph, *, indent=0, first_line=12.5, keep=False, quote_depth=0, cell=False):
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        paragraph.paragraph_format.left_indent = Mm(indent + quote_depth * 10)
-        paragraph.paragraph_format.first_line_indent = Mm(0 if cell or quote_depth else first_line)
-        paragraph.paragraph_format.right_indent = Mm(8 if quote_depth else 0)
-        paragraph.paragraph_format.line_spacing = 1.5
-        paragraph.paragraph_format.space_before = Pt(4 if quote_depth else 0)
-        paragraph.paragraph_format.space_after = Pt(4 if quote_depth else 0)
+    def _format_paragraph(self, paragraph, *, indent=0, first_line=None, keep=False, quote_depth=0, cell=False):
+        body = self.profile["body"]
+        quote = self.profile["quotes"]
+        paragraph.alignment = _alignment(body["alignment"])
+        paragraph.paragraph_format.left_indent = Mm(indent + self._quote_left_indent(quote_depth))
+        first_line_indent = body["first_line_indent_mm"] if first_line is None else first_line
+        paragraph.paragraph_format.first_line_indent = Mm(0 if cell or quote_depth else first_line_indent)
+        paragraph.paragraph_format.right_indent = Mm(quote["right_indent_mm"] if quote_depth else 0)
+        paragraph.paragraph_format.line_spacing = quote["line_spacing"] if quote_depth else body["line_spacing"]
+        paragraph.paragraph_format.space_before = Pt(quote["space_before_pt"] if quote_depth else body["space_before_pt"])
+        paragraph.paragraph_format.space_after = Pt(quote["space_after_pt"] if quote_depth else body["space_after_pt"])
         paragraph.paragraph_format.keep_together = keep
         paragraph.paragraph_format.widow_control = True
         if quote_depth:
@@ -877,10 +1041,20 @@ class DocxRenderer:
         italic=False,
         code_block=False,
         omit_text_prefix: str | None = None,
+        font_family=None,
+        color=None,
     ):
         if inline is None or inline.children is None:
             if inline and inline.content:
-                _style_run(paragraph.add_run(inline.content), size=size, bold=bold, italic=italic, code=code_block)
+                self._style_run(
+                    paragraph.add_run(inline.content),
+                    size=size,
+                    bold=bold,
+                    italic=italic,
+                    code=code_block,
+                    font_family=font_family,
+                    color=color,
+                )
             return
         bold_stack = [bold]
         italic_stack = [italic]
@@ -916,6 +1090,7 @@ class DocxRenderer:
                 if link_stack and link_stack[-1]:
                     scheme = urllib.parse.urlsplit(link_stack[-1]).scheme.lower()
                     if scheme in {"http", "https", "mailto"}:
+                        link_style = self.profile["links"]
                         _add_hyperlink(
                             paragraph,
                             content,
@@ -923,23 +1098,31 @@ class DocxRenderer:
                             bold_stack[-1],
                             italic_stack[-1],
                             strike_stack[-1],
+                            font_family=link_style["font_family"],
+                            size=link_style["font_size_pt"],
+                            color=link_style["color"],
+                            underline=link_style["underline"],
                         )
                     else:
-                        _style_run(
+                        self._style_run(
                             paragraph.add_run(content),
                             size=size,
                             bold=bold_stack[-1],
                             italic=italic_stack[-1],
                             strike=strike_stack[-1],
+                            font_family=font_family,
+                            color=color,
                         )
                 else:
-                    _style_run(
+                    self._style_run(
                         paragraph.add_run(content),
-                        size=size,
+                        size=self.profile["code"]["font_size_pt"] if is_code else size,
                         bold=bold_stack[-1],
                         italic=italic_stack[-1],
                         strike=strike_stack[-1],
                         code=is_code,
+                        font_family=self.profile["code"]["font_family"] if is_code else font_family,
+                        color=self.profile["code"]["color"] if is_code else color,
                     )
             elif child.type == "image":
                 src = child.attrGet("src") or ""
@@ -948,7 +1131,8 @@ class DocxRenderer:
                     width_px = image.width
                     dpi = image.info.get("dpi", (96, 96))[0]
                 dpi_width = max(1, width_px) / (dpi if dpi and dpi > 0 else 96)
-                width = min(Inches(dpi_width), self.content_width)
+                maximum_width = self.content_width * self.profile["images"]["max_width_percent"] / 100
+                width = min(Inches(dpi_width), maximum_width)
                 run = paragraph.add_run()
                 picture = run.add_picture(io.BytesIO(data), width=width)
                 alt = child.attrGet("alt") or child.content or ""
@@ -958,25 +1142,34 @@ class DocxRenderer:
             elif child.type == "hardbreak":
                 paragraph.add_run().add_break()
             elif child.type == "html_inline":
-                _style_run(
+                        self._style_run(
                     paragraph.add_run(child.content),
                     size=size,
                     bold=bold_stack[-1],
                     italic=italic_stack[-1],
                     strike=strike_stack[-1],
+                            font_family=font_family,
+                            color=color,
                 )
 
     def _add_caption(self, caption: tuple[str, str], *, table: bool, page_break_before: bool = False):
         number, title = caption
+        settings = self.profile["captions"]["table" if table else "figure"]
         paragraph = self.document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT if table else WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.alignment = _alignment(settings["alignment"])
         paragraph.paragraph_format.first_line_indent = Mm(0)
         paragraph.paragraph_format.left_indent = Mm(0)
-        paragraph.paragraph_format.space_before = Pt(6)
-        paragraph.paragraph_format.space_after = Pt(3 if table else 6)
+        paragraph.paragraph_format.space_before = Pt(settings["space_before_pt"])
+        paragraph.paragraph_format.space_after = Pt(settings["space_after_pt"])
         paragraph.paragraph_format.keep_with_next = True
         paragraph.paragraph_format.page_break_before = page_break_before
-        _style_run(paragraph.add_run(f"{'Таблица' if table else 'Рисунок'} {number} — {title}"), bold=table)
+        self._style_run(
+            paragraph.add_run(f"{'Таблица' if table else 'Рисунок'} {number} — {title}"),
+            size=settings["font_size_pt"],
+            bold=settings["bold"],
+            font_family=settings["font_family"],
+            color=settings["color"],
+        )
 
     @staticmethod
     def _estimated_cell_lines(inline, characters_per_line: int) -> int:
@@ -1051,11 +1244,15 @@ class DocxRenderer:
                 break
         return widths
 
-    def _estimated_row_height(self, row_tokens: list[Any], column_widths: list[float]) -> float:
+    def _estimated_row_height(self, row_tokens: list[Any], column_widths: list[float], *, header=False) -> float:
         estimated_lines = []
+        table_settings = self.profile["tables"]
+        font_size = table_settings["header_font_size_pt"] if header else table_settings["body_font_size_pt"]
+        characters_per_mm = 1 / max(0.7, font_size * 0.2)
         for column_index, cell in enumerate(row_tokens):
             width_mm = column_widths[column_index] if column_index < len(column_widths) else min(column_widths)
-            characters_per_line = max(8, int((width_mm - 3.2) / 1.9))
+            available_width = width_mm - 2 * table_settings["padding_horizontal_mm"]
+            characters_per_line = max(4, int(available_width * characters_per_mm))
             estimated_lines.append(self._estimated_cell_lines(cell, characters_per_line))
         text_lines = max(estimated_lines, default=1)
         image_height = 35 if any(
@@ -1064,7 +1261,9 @@ class DocxRenderer:
             if cell and cell.children
             for child in cell.children
         ) else 0
-        return max(text_lines * 6.35 + 2.5, image_height + 2.5)
+        line_height = font_size * self.profile["body"]["line_spacing"] * 1.2 / 2.83465
+        padding = table_settings["padding_top_mm"] + table_settings["padding_bottom_mm"]
+        return max(text_lines * line_height + padding, image_height + padding)
 
     def _estimated_paragraph_height_mm(self, paragraph) -> float:
         font_size = paragraph.style.font.size or Pt(12)
@@ -1079,17 +1278,90 @@ class DocxRenderer:
         after = paragraph.paragraph_format.space_after or paragraph.style.paragraph_format.space_after or Pt(0)
         return line_count * line_height_mm + before / 36_000 + after / 36_000
 
-    def _table_page_capacities(self, previous, has_caption: bool) -> tuple[float, float]:
+    def _estimated_table_height_mm(self, table: DocxTable) -> float:
+        settings = self.profile["tables"]
+        widths = [
+            (column.width or self.content_width / max(1, len(table.columns))) / 36_000
+            for column in table.columns
+        ]
+        line_height_multiplier = self.profile["body"]["line_spacing"] * 1.2
+        padding = settings["padding_top_mm"] + settings["padding_bottom_mm"]
+        row_heights = []
+        for row_index, row in enumerate(table.rows):
+            header = row_index == 0 and "w:tblHeader" in row._tr.xml
+            font_size = settings["header_font_size_pt"] if header else settings["body_font_size_pt"]
+            characters_per_mm = 1 / max(0.7, font_size * 0.2)
+            cell_lines = []
+            for column_index, cell in enumerate(row.cells):
+                width = widths[column_index] if column_index < len(widths) else min(widths)
+                chars_per_line = max(4, int((width - 2 * settings["padding_horizontal_mm"]) * characters_per_mm))
+                words = " ".join(cell.text.split()).split()
+                line_count = 1
+                occupied = 0
+                for word in words:
+                    remaining = word
+                    while remaining:
+                        available = chars_per_line - occupied - (1 if occupied else 0)
+                        if available <= 0:
+                            line_count += 1
+                            occupied = 0
+                            available = chars_per_line
+                        take = min(len(remaining), available)
+                        occupied += take + (1 if occupied else 0)
+                        remaining = remaining[take:]
+                        if remaining:
+                            line_count += 1
+                            occupied = 0
+                cell_lines.append(line_count)
+            row_heights.append(max(cell_lines, default=1) * font_size * line_height_multiplier / 2.83465 + padding)
+
+        if not row_heights:
+            return 0.0
+        total = sum(row_heights)
+        content_height = self._page_content_height_mm()
+        pages = max(1, int((total + content_height - 1) // content_height))
+        return total + max(0, pages - 1) * row_heights[0]
+
+    def _page_content_height_mm(self) -> float:
         section = self.document.sections[0]
-        page_height = (section.page_height - section.top_margin - section.bottom_margin) / 36_000
-        heading_height = (
-            self._estimated_paragraph_height_mm(previous)
-            if has_caption and previous and previous.style.name.startswith("Heading")
-            else 0.0
-        )
-        first_capacity = page_height - 5.0 - (10.0 if has_caption else 0.0) - heading_height
-        later_capacity = page_height - 5.0 - 8.0
-        return max(30.0, first_capacity), max(30.0, later_capacity)
+        return (section.page_height - section.top_margin - section.bottom_margin) / 36_000
+
+    def _estimated_current_page_usage_mm(self) -> float:
+        page_capacity = max(30.0, self._page_content_height_mm() - 5.0)
+        used = 0.0
+        body = self.document._element.body
+        for element in body.iterchildren():
+            if element.tag == qn("w:p"):
+                paragraph = DocxParagraph(element, self.document)
+                if paragraph.paragraph_format.page_break_before:
+                    used = 0.0
+                if any(node.get(qn("w:type")) == "page" for node in element.iter(qn("w:br"))):
+                    used = 0.0
+                    continue
+                used += self._estimated_paragraph_height_mm(paragraph) * 1.1
+            elif element.tag == qn("w:tbl"):
+                table_height = self._estimated_table_height_mm(DocxTable(element, self.document))
+                used += table_height
+            else:
+                continue
+            if used >= page_capacity:
+                used %= page_capacity
+        return used
+
+    def _table_page_capacities(self, has_caption: bool, *, new_page: bool = False) -> tuple[float, float]:
+        page_height = self._page_content_height_mm()
+        caption = self.profile["captions"]["table"]
+        continuation = self.profile["captions"]["continuation"]
+        caption_height = (
+            caption["font_size_pt"] * 1.5 + caption["space_before_pt"] + caption["space_after_pt"]
+        ) / 2.83465 if has_caption else 0.0
+        continuation_height = (
+            continuation["font_size_pt"] * 1.5 + continuation["space_before_pt"] + continuation["space_after_pt"]
+        ) / 2.83465
+        used = 0.0 if new_page else self._estimated_current_page_usage_mm()
+        first_capacity = page_height - 5.0 - used - caption_height
+        later_capacity = page_height - 5.0 - continuation_height
+        return max(0.0, first_capacity), max(30.0, later_capacity)
 
     def _paginate_table_rows(
         self,
@@ -1098,7 +1370,7 @@ class DocxRenderer:
         first_capacity: float,
         later_capacity: float,
     ) -> list[list[list[Any]]]:
-        header_height = self._estimated_row_height(rows[0], column_widths) if rows else 0
+        header_height = self._estimated_row_height(rows[0], column_widths, header=True) if rows else 0
         pages: list[list[list[Any]]] = []
         current: list[list[Any]] = []
         capacity = max(30, first_capacity - header_height)
@@ -1121,13 +1393,20 @@ class DocxRenderer:
         return pages
 
     def _add_continuation_label(self, number: str):
+        settings = self.profile["captions"]["continuation"]
         paragraph = self.document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.alignment = _alignment(settings["alignment"])
         paragraph.paragraph_format.first_line_indent = Mm(0)
-        paragraph.paragraph_format.space_before = Pt(0)
-        paragraph.paragraph_format.space_after = Pt(4)
+        paragraph.paragraph_format.space_before = Pt(settings["space_before_pt"])
+        paragraph.paragraph_format.space_after = Pt(settings["space_after_pt"])
         paragraph.paragraph_format.keep_with_next = True
-        _style_run(paragraph.add_run(f"Продолжение таблицы {number}"))
+        self._style_run(
+            paragraph.add_run(f"Продолжение таблицы {number}"),
+            size=settings["font_size_pt"],
+            bold=settings["bold"],
+            font_family=settings["font_family"],
+            color=settings["color"],
+        )
 
     def _add_table_rows(self, rows: list[list[Any]], column_widths: list[float]):
         if not rows:
@@ -1135,26 +1414,50 @@ class DocxRenderer:
         column_count = len(column_widths)
         table = self.document.add_table(rows=0, cols=column_count)
         table.autofit = False
-        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+        table.alignment = {
+            "left": WD_TABLE_ALIGNMENT.LEFT,
+            "center": WD_TABLE_ALIGNMENT.CENTER,
+            "right": WD_TABLE_ALIGNMENT.RIGHT,
+        }[self.profile["tables"]["alignment"]]
         widths = [Emu(int(width_mm * 36_000)) for width_mm in column_widths]
         for column_index, column in enumerate(table.columns):
             column.width = widths[column_index]
-        _set_table_borders(table)
+        _set_table_borders(table, self.profile["tables"]["border_color"], self.profile["tables"]["border_width_pt"])
 
         for row_index, row_tokens in enumerate(rows):
             row = table.add_row()
             _set_row_cant_split(row)
             if row_index == 0:
                 _mark_repeat_header(row)
+            row_style = self.profile["tables"]
+            vertical = {
+                "top": WD_CELL_VERTICAL_ALIGNMENT.TOP,
+                "center": WD_CELL_VERTICAL_ALIGNMENT.CENTER,
+                "bottom": WD_CELL_VERTICAL_ALIGNMENT.BOTTOM,
+            }[row_style["vertical_alignment"]]
             for cell_index, inline in enumerate(row_tokens):
                 cell = row.cells[cell_index]
                 cell.width = widths[cell_index]
-                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                cell.vertical_alignment = vertical
                 paragraph = cell.paragraphs[0]
                 self._format_paragraph(paragraph, first_line=0, cell=True)
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if row_index == 0 else WD_ALIGN_PARAGRAPH.LEFT
-                self._append_inline(paragraph, inline, bold=row_index == 0)
-                _set_cell_margins(cell)
+                header = row_index == 0
+                paragraph.alignment = _alignment(row_style["header_alignment"] if header else row_style["body_alignment"])
+                self._append_inline(
+                    paragraph,
+                    inline,
+                    size=row_style["header_font_size_pt"] if header else row_style["body_font_size_pt"],
+                    bold=row_style["header_bold"] if header else False,
+                    font_family=row_style["header_font_family"] if header else row_style["body_font_family"],
+                    color=row_style["header_color"] if header else row_style["body_color"],
+                )
+                _set_cell_margins(
+                    cell,
+                    top=row_style["padding_top_mm"],
+                    start=row_style["padding_horizontal_mm"],
+                    bottom=row_style["padding_bottom_mm"],
+                    end=row_style["padding_horizontal_mm"],
+                )
 
     def add_table(self, block: Block):
         caption = block.caption
@@ -1165,8 +1468,15 @@ class DocxRenderer:
         column_widths = self._table_column_widths(rows, cols)
         previous_paragraphs = self.document.paragraphs
         previous = previous_paragraphs[-1] if previous_paragraphs else None
-        first_capacity, later_capacity = self._table_page_capacities(previous, bool(caption))
-        estimated_total = sum(self._estimated_row_height(row, column_widths) for row in rows)
+        if caption and previous and previous.style.name.startswith("Heading") and len(previous_paragraphs) > 1:
+            previous.paragraph_format.page_break_before = True
+        first_capacity, later_capacity = self._table_page_capacities(bool(caption))
+        estimated_total = (
+            self._estimated_row_height(rows[0], column_widths, header=True)
+            + sum(self._estimated_row_height(row, column_widths) for row in rows[1:])
+            if rows
+            else 0
+        )
         if estimated_total <= first_capacity or not caption:
             if caption:
                 self._add_caption(caption, table=True)
@@ -1174,12 +1484,11 @@ class DocxRenderer:
             return
 
         if caption:
-            page_break_before = False
-            if previous and previous.style.name.startswith("Heading"):
-                if len(previous_paragraphs) > 1:
-                    previous.paragraph_format.page_break_before = True
-            elif previous:
-                page_break_before = True
+            header_height = self._estimated_row_height(rows[0], column_widths, header=True)
+            first_row_height = self._estimated_row_height(rows[1], column_widths) if len(rows) > 1 else 0
+            page_break_before = first_capacity < header_height + first_row_height
+            if page_break_before:
+                first_capacity, later_capacity = self._table_page_capacities(True, new_page=True)
             self._add_caption(caption, table=True, page_break_before=page_break_before)
         pages = self._paginate_table_rows(rows, column_widths, first_capacity, later_capacity)
         for page_index, data_rows in enumerate(pages):
@@ -1190,21 +1499,23 @@ class DocxRenderer:
             self._add_table_rows([rows[0], *data_rows], column_widths)
 
     def add_image_paragraph(self, inline):
-        return self.add_paragraph(inline, alignment=WD_ALIGN_PARAGRAPH.CENTER, first_line=0, keep=True)
+        return self.add_paragraph(inline, alignment=_alignment(self.profile["images"]["alignment"]), first_line=0, keep=True)
 
     def add_list(self, block: Block, depth: int = 0, quote_depth: int = 0):
         numbering_id = self._new_ordered_list_id(block.start_number, depth, quote_depth) if block.ordered else None
+        settings = self.profile["lists"]
+        quote = self.profile["quotes"]
         for item_index, item in enumerate(block.children or []):
             item_blocks = item.children or []
             for child_index, child in enumerate(item_blocks):
                 if child.kind == "paragraph":
                     style_name = "List Number" if block.ordered else "List Bullet"
                     paragraph = self.document.add_paragraph(style=style_name)
-                    paragraph.paragraph_format.left_indent = Mm(7 + depth * 7 + quote_depth * 10)
-                    paragraph.paragraph_format.first_line_indent = Mm(-4)
-                    paragraph.paragraph_format.line_spacing = 1.5
-                    paragraph.paragraph_format.space_after = Pt(0)
-                    paragraph.paragraph_format.right_indent = Mm(8 if quote_depth else 0)
+                    paragraph.paragraph_format.left_indent = Mm(settings["left_indent_mm"] + depth * settings["depth_indent_mm"] + self._quote_left_indent(quote_depth))
+                    paragraph.paragraph_format.first_line_indent = Mm(-settings["hanging_indent_mm"])
+                    paragraph.paragraph_format.line_spacing = settings["line_spacing"]
+                    paragraph.paragraph_format.space_after = Pt(settings["space_after_pt"])
+                    paragraph.paragraph_format.right_indent = Mm(quote["right_indent_mm"] if quote_depth else 0)
                     if numbering_id is not None:
                         self._set_paragraph_numbering(paragraph, numbering_id)
                     if quote_depth:
@@ -1217,7 +1528,7 @@ class DocxRenderer:
                     if task_match:
                         task_prefix = task_match.group(1)
                         checkbox = paragraph.add_run("☑ " if task_match.group(2).strip() else "☐ ")
-                        _style_run(checkbox)
+                        self._style_run(checkbox)
                         checkbox.font.name = "Segoe UI Symbol"
                         checkbox._element.rPr.rFonts.set(qn("w:eastAsia"), "Segoe UI Symbol")
                         checkbox._element.rPr.rFonts.set(qn("w:cs"), "Segoe UI Symbol")
@@ -1229,13 +1540,23 @@ class DocxRenderer:
         if block.kind == "heading":
             paragraph = self.document.add_paragraph(style=f"Heading {max(1, min(6, block.level))}")
             if quote_depth:
-                paragraph.paragraph_format.left_indent = (paragraph.paragraph_format.left_indent or Mm(0)) + Mm(quote_depth * 10)
+                quote = self.profile["quotes"]
+                paragraph.paragraph_format.left_indent = (paragraph.paragraph_format.left_indent or Mm(0)) + Mm(self._quote_left_indent(quote_depth))
                 paragraph.paragraph_format.first_line_indent = Mm(0)
-                paragraph.paragraph_format.right_indent = Mm(8)
-                paragraph.paragraph_format.space_before = Pt(4)
-                paragraph.paragraph_format.space_after = Pt(4)
+                paragraph.paragraph_format.right_indent = Mm(quote["right_indent_mm"])
+                paragraph.paragraph_format.space_before = Pt(quote["space_before_pt"])
+                paragraph.paragraph_format.space_after = Pt(quote["space_after_pt"])
                 self._apply_quote_border(paragraph)
-            self._append_inline(paragraph, block.value, size=[20, 18, 16, 14, 13, 12][max(0, min(5, block.level - 1))], bold=True)
+            heading = self.profile["headings"][max(0, min(5, block.level - 1))]
+            self._append_inline(
+                paragraph,
+                block.value,
+                size=heading["font_size_pt"],
+                bold=heading["bold"],
+                italic=heading["italic"],
+                font_family=heading["font_family"],
+                color=heading["color"],
+            )
         elif block.kind == "paragraph":
             if block.value and _plain_inline(block.value).strip() == PAGEBREAK_MARKER:
                 self.document.add_page_break()
@@ -1257,18 +1578,19 @@ class DocxRenderer:
             text = block.value.content.rstrip("\n")
             for line in text.split("\n") or [""]:
                 p = self.add_paragraph(None, code_block=True, quote_depth=quote_depth, first_line=0)
-                _style_run(p.add_run(line), size=10, code=True)
+                self._style_run(p.add_run(line), size=self.profile["code"]["font_size_pt"], code=True)
         elif block.kind == "hr":
             paragraph = self.document.add_paragraph()
             paragraph.paragraph_format.first_line_indent = Mm(0)
-            paragraph.paragraph_format.space_before = Pt(5)
-            paragraph.paragraph_format.space_after = Pt(5)
+            settings = self.profile["horizontal_rule"]
+            paragraph.paragraph_format.space_before = Pt(settings["space_before_pt"])
+            paragraph.paragraph_format.space_after = Pt(settings["space_after_pt"])
             p_bdr = OxmlElement("w:pBdr")
             bottom = OxmlElement("w:bottom")
             bottom.set(qn("w:val"), "single")
-            bottom.set(qn("w:sz"), "4")
+            bottom.set(qn("w:sz"), str(round(settings["width_pt"] * 8)))
             bottom.set(qn("w:space"), "1")
-            bottom.set(qn("w:color"), "000000")
+            bottom.set(qn("w:color"), settings["color"].lstrip("#"))
             p_bdr.append(bottom)
             paragraph._p.get_or_add_pPr().append(p_bdr)
 
@@ -1298,25 +1620,53 @@ class DocxRenderer:
         return output.getvalue()
 
 
-def build_docx(markdown: str, images: dict[str, bytes], *, header_mode: str, header_text: str, footer_mode: str, footer_text: str) -> bytes:
+def build_docx(
+    markdown: str,
+    images: dict[str, bytes],
+    *,
+    header_mode: str,
+    header_text: str,
+    footer_mode: str,
+    footer_text: str,
+    profile: dict[str, Any] | None = None,
+    numbering_start_page: int = 1,
+    numbering_mode: str = "continue",
+) -> bytes:
     if len(markdown.encode("utf-8")) > 5 * 1024 * 1024:
         raise ConversionError("Markdown-файл превышает лимит 5 МБ.")
     if not markdown.strip():
         raise ConversionError("Markdown-файл пустой.")
+    try:
+        profile = validate_profile(profile)
+    except ProfileValidationError as exc:
+        raise ConversionError(str(exc), "profile") from exc
     header_mode, header_text = _validate_footer(header_mode, header_text, "верхнего")
     footer_mode, footer_text = _validate_footer(footer_mode, footer_text, "нижнего")
-    renderer = DocxRenderer(images, header_mode, header_text, footer_mode, footer_text)
+    if isinstance(numbering_start_page, bool) or not isinstance(numbering_start_page, int) or not 1 <= numbering_start_page <= 1000:
+        raise ConversionError("Страница начала нумерации должна быть целым числом от 1 до 1000.", "headers")
+    if numbering_mode not in {"continue", "restart"}:
+        raise ConversionError("Выберите корректный режим нумерации страниц.", "headers")
+    renderer = DocxRenderer(
+        images,
+        header_mode,
+        header_text,
+        footer_mode,
+        footer_text,
+        profile,
+        numbering_start_page,
+        numbering_mode,
+    )
     return renderer.render(markdown)
 
 
 def _validate_footer(mode: str, text: str, label: str) -> tuple[str, str]:
     if mode not in {"none", "text", "page"}:
-        raise ConversionError(f"Выберите корректный режим {label} колонтитула.")
+        raise ConversionError(f"Выберите корректный режим {label} колонтитула.", "headers")
     text = text.strip()
     if len(text) > 240:
-        raise ConversionError(f"Текст {label} колонтитула не должен превышать 240 символов.")
+        raise ConversionError(f"Текст {label} колонтитула не должен превышать 240 символов.", "headers")
     if mode == "text" and not text:
-        raise ConversionError(f"Введите текст {label} колонтитула или отключите его.")
+        raise ConversionError(f"Введите текст {label} колонтитула или отключите его.", "headers")
     return mode, text
 
 
@@ -1340,6 +1690,54 @@ def _append_field(paragraph, instruction: str, result: str, hidden: bool = False
     paragraph.add_run()._r.append(end)
 
 
+def _append_field_char(paragraph, kind: str):
+    node = OxmlElement("w:fldChar")
+    node.set(qn("w:fldCharType"), kind)
+    paragraph.add_run()._r.append(node)
+
+
+def _append_instruction(paragraph, instruction: str):
+    node = OxmlElement("w:instrText")
+    node.set(qn("xml:space"), "preserve")
+    node.text = instruction
+    paragraph.add_run()._r.append(node)
+
+
+def _append_nested_page_field(paragraph, cached: str):
+    _append_field_char(paragraph, "begin")
+    _append_instruction(paragraph, " PAGE ")
+    _append_field_char(paragraph, "separate")
+    paragraph.add_run(cached)
+    _append_field_char(paragraph, "end")
+
+
+def _append_nested_calculation(paragraph, start_page: int):
+    _append_field_char(paragraph, "begin")
+    _append_instruction(paragraph, " = ")
+    _append_nested_page_field(paragraph, str(start_page))
+    _append_instruction(paragraph, f" - {start_page - 1} ")
+    _append_field_char(paragraph, "separate")
+    paragraph.add_run("1")
+    _append_field_char(paragraph, "end")
+
+
+def _append_conditional_page_number(paragraph, start_page: int, mode: str):
+    _append_field_char(paragraph, "begin")
+    _append_instruction(paragraph, " IF ")
+    _append_nested_page_field(paragraph, str(start_page))
+    _append_instruction(paragraph, f' >= "{start_page}" "')
+    if mode == "restart":
+        _append_nested_calculation(paragraph, start_page)
+        cached = "1"
+    else:
+        _append_nested_page_field(paragraph, str(start_page))
+        cached = str(start_page)
+    _append_instruction(paragraph, '" "" ')
+    _append_field_char(paragraph, "separate")
+    paragraph.add_run(cached if start_page == 1 else "")
+    _append_field_char(paragraph, "end")
+
+
 def _mark_repeat_header(row):
     tr_pr = row._tr.get_or_add_trPr()
     table_header = OxmlElement("w:tblHeader")
@@ -1353,7 +1751,7 @@ def _set_row_cant_split(row):
     tr_pr.append(cant_split)
 
 
-def _set_cell_margins(cell, top=70, start=90, bottom=70, end=90):
+def _set_cell_margins(cell, top=1.23, start=1.59, bottom=1.23, end=1.59):
     tc = cell._tc
     tc_pr = tc.get_or_add_tcPr()
     margins = tc_pr.first_child_found_in("w:tcMar")
@@ -1365,11 +1763,11 @@ def _set_cell_margins(cell, top=70, start=90, bottom=70, end=90):
         if node is None:
             node = OxmlElement(f"w:{margin}")
             margins.append(node)
-        node.set(qn("w:w"), str(value))
+        node.set(qn("w:w"), str(round(float(value) * 56.6929)))
         node.set(qn("w:type"), "dxa")
 
 
-def _set_table_borders(table):
+def _set_table_borders(table, color="#000000", width_pt=0.5):
     tbl_pr = table._tbl.tblPr
     borders = tbl_pr.first_child_found_in("w:tblBorders")
     if borders is None:
@@ -1381,6 +1779,6 @@ def _set_table_borders(table):
             element = OxmlElement(f"w:{edge}")
             borders.append(element)
         element.set(qn("w:val"), "single")
-        element.set(qn("w:sz"), "4")
+        element.set(qn("w:sz"), str(round(float(width_pt) * 8)))
         element.set(qn("w:space"), "0")
-        element.set(qn("w:color"), "000000")
+        element.set(qn("w:color"), color.lstrip("#"))
