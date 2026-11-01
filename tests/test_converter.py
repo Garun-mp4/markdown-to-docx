@@ -13,8 +13,13 @@ from docx.shared import Mm, Pt
 from PIL import Image
 from werkzeug.datastructures import MultiDict
 
+import converter
 from app import app
 from converter import (
+    MAX_ARCHIVE_UNPACKED,
+    MAX_IMAGE_BYTES,
+    MAX_REQUEST_BYTES,
+    MAX_TOTAL_IMAGE_BYTES,
     Asset,
     ConversionError,
     SelectionRequired,
@@ -30,6 +35,57 @@ def png_bytes(color=(20, 50, 90)):
     buffer = io.BytesIO()
     Image.new("RGB", (40, 30), color).save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def test_upload_limits_allow_30mb_per_image_and_200mb_total():
+    assert MAX_IMAGE_BYTES == 30 * 1024 * 1024
+    assert MAX_REQUEST_BYTES == 200 * 1024 * 1024
+    assert MAX_TOTAL_IMAGE_BYTES == 200 * 1024 * 1024
+    assert MAX_ARCHIVE_UNPACKED == 200 * 1024 * 1024
+    assert app.config["MAX_CONTENT_LENGTH"] == MAX_REQUEST_BYTES + 1024 * 1024
+
+
+def test_api_rejects_combined_uploaded_files_over_200mb(monkeypatch):
+    monkeypatch.setattr("app.MAX_REQUEST_BYTES", 6)
+    data = MultiDict([
+        ("source", (io.BytesIO(b"1234"), "report.md")),
+        ("assets", (io.BytesIO(b"567"), "plot.png")),
+    ])
+
+    response = app.test_client().post("/api/convert", data=data, content_type="multipart/form-data")
+
+    assert response.status_code == 413
+    assert response.json["field"] == "assets"
+    assert "200 МБ" in response.json["error"]
+
+
+def test_individual_resource_respects_the_per_image_size_limit(monkeypatch):
+    monkeypatch.setattr(converter, "MAX_IMAGE_BYTES", 5)
+    source = SimpleNamespace(filename="report.md", read=lambda: b"Text")
+    oversized_image = SimpleNamespace(filename="plot.png", read=lambda _limit: b"123456")
+
+    with pytest.raises(ConversionError, match="превышает лимит 30 МБ"):
+        collect_project(source, [oversized_image], "")
+
+
+def test_project_and_resource_zips_share_the_unpacked_size_budget(monkeypatch):
+    monkeypatch.setattr(converter, "MAX_ARCHIVE_UNPACKED", 80)
+    project = io.BytesIO()
+    with zipfile.ZipFile(project, "w") as archive:
+        archive.writestr("report.md", "![Plot](plot.png)")
+    project.seek(0)
+
+    resources = io.BytesIO()
+    with zipfile.ZipFile(resources, "w") as archive:
+        archive.writestr("plot.png", png_bytes())
+    resources.seek(0)
+
+    with pytest.raises(ConversionError, match="Общий распакованный объём"):
+        collect_project(
+            SimpleNamespace(filename="project.zip", read=project.read),
+            [SimpleNamespace(filename="assets.zip", read=resources.read)],
+            "",
+        )
 
 
 def test_page_profile_headings_and_page_break():

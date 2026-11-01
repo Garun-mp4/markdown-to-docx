@@ -26,6 +26,8 @@ const numberingMode = document.querySelector("#numbering-mode");
 const numberingControls = document.querySelector("#numbering-controls");
 const defaultProfile = JSON.parse(document.querySelector("#default-profile").textContent);
 const validImageExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"]);
+const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
+const MAX_TOTAL_UPLOAD_BYTES = 200 * 1024 * 1024;
 
 let selectedSource = null;
 let selectedAssets = [];
@@ -432,8 +434,14 @@ function handleSourceFile(file) {
     sourceInput.value = "";
     return;
   }
-  if (file.size > 50 * 1024 * 1024) {
-    setFieldError("source", `${file.name}: размер превышает общий лимит 50 МБ.`);
+  if (extension === ".md" && file.size > 5 * 1024 * 1024) {
+    setFieldError("source", `${file.name}: Markdown-файл превышает лимит 5 МБ.`);
+    sourceInput.value = "";
+    return;
+  }
+  const assetBytes = selectedAssets.reduce((sum, asset) => sum + asset.file.size, 0);
+  if (file.size + assetBytes > MAX_TOTAL_UPLOAD_BYTES) {
+    setFieldError("source", `${file.name}: общий размер исходного файла и ресурсов не должен превышать 200 МБ.`);
     sourceInput.value = "";
     return;
   }
@@ -509,26 +517,22 @@ function addAssetFiles(entries) {
   clearFieldError("assets");
   const rejected = [];
   const added = [];
-  let totalBytes = selectedAssets.reduce((sum, asset) => sum + asset.file.size, 0);
+  let totalBytes = selectedAssets.reduce((sum, asset) => sum + asset.file.size, selectedSource?.size ?? 0);
 
   for (const entry of entries) {
     const file = entry.file;
     const path = entry.path || file.name;
     const extension = fileExtension(path);
-    if (extension === ".zip") {
-      if (file.size > 50 * 1024 * 1024) {
-        rejected.push(`${path}: ZIP больше 50 МБ`);
-        continue;
-      }
-    } else if (!validImageExtensions.has(extension)) {
+    if (extension !== ".zip" && !validImageExtensions.has(extension)) {
       rejected.push(`${path}: нужен файл изображения или ZIP`);
       continue;
-    } else if (file.size > 10 * 1024 * 1024) {
-      rejected.push(`${path}: изображение больше 10 МБ`);
+    }
+    if (extension !== ".zip" && file.size > MAX_IMAGE_BYTES) {
+      rejected.push(`${path}: изображение больше 30 МБ`);
       continue;
     }
-    if (totalBytes + file.size > 50 * 1024 * 1024) {
-      rejected.push(`${path}: общий размер загрузки превысит 50 МБ`);
+    if (totalBytes + file.size > MAX_TOTAL_UPLOAD_BYTES) {
+      rejected.push(`${path}: общий размер исходного файла и ресурсов превысит 200 МБ`);
       continue;
     }
     totalBytes += file.size;

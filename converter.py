@@ -27,9 +27,10 @@ from PIL import Image, UnidentifiedImageError
 from docx_profile import ProfileValidationError, validate_profile
 
 MAX_ARCHIVE_ENTRIES = 1_500
-MAX_ARCHIVE_UNPACKED = 100 * 1024 * 1024
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_TOTAL_IMAGE_BYTES = 30 * 1024 * 1024
+MAX_REQUEST_BYTES = 200 * 1024 * 1024
+MAX_ARCHIVE_UNPACKED = MAX_REQUEST_BYTES
+MAX_IMAGE_BYTES = 30 * 1024 * 1024
+MAX_TOTAL_IMAGE_BYTES = MAX_REQUEST_BYTES
 MAX_REMOTE_REDIRECTS = 3
 IMAGE_FORMATS = {"PNG", "JPEG", "GIF", "BMP", "TIFF", "WEBP"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
@@ -93,15 +94,20 @@ def _normal_archive_path(path: str) -> str | None:
     return "/".join(parts) or None
 
 
-def _zip_assets(upload, label: str, field: str = "source") -> tuple[list[Asset], list[tuple[str, bytes]]]:
+def _zip_assets(
+    upload,
+    label: str,
+    field: str = "source",
+    unpacked_limit: int = MAX_ARCHIVE_UNPACKED,
+) -> tuple[list[Asset], list[tuple[str, bytes]]]:
     if upload is None or not upload.filename:
         return [], []
     if not upload.filename.lower().endswith(".zip"):
         raise ConversionError("Здесь принимается ZIP-архив проекта или ресурсов.", field)
 
     raw = upload.read()
-    if len(raw) > 50 * 1024 * 1024:
-        raise ConversionError("ZIP-архив превышает лимит 50 МБ.", field)
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ConversionError("ZIP-архив превышает лимит 200 МБ.", field)
     try:
         archive = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile as exc:
@@ -125,10 +131,10 @@ def _zip_assets(upload, label: str, field: str = "source") -> tuple[list[Asset],
             if mode == 0o120000:
                 raise ConversionError("Символические ссылки в ZIP-архивах не поддерживаются.", field)
             total += info.file_size
-            if info.file_size < 0 or total > MAX_ARCHIVE_UNPACKED:
-                raise ConversionError("Распакованный архив превышает лимит 100 МБ.", field)
+            if info.file_size < 0 or total > unpacked_limit:
+                raise ConversionError("Общий распакованный объём ZIP-файлов превышает лимит 200 МБ.", field)
             if info.file_size > MAX_IMAGE_BYTES and not safe_path.lower().endswith(".md"):
-                raise ConversionError(f"Файл {PurePosixPath(safe_path).name} превышает лимит 10 МБ.", field)
+                raise ConversionError(f"Файл {PurePosixPath(safe_path).name} превышает лимит 30 МБ.", field)
             try:
                 data = archive.read(info)
             except (RuntimeError, zipfile.BadZipFile) as exc:
@@ -170,12 +176,13 @@ def _individual_asset(upload, index: int) -> Asset:
         )
     data = upload.read(MAX_IMAGE_BYTES + 1)
     if len(data) > MAX_IMAGE_BYTES:
-        raise ConversionError(f"Изображение {PurePosixPath(safe_path).name} превышает лимит 10 МБ.", "assets")
+        raise ConversionError(f"Изображение {PurePosixPath(safe_path).name} превышает лимит 30 МБ.", "assets")
     return Asset(f"resources:{index}:{safe_path}", safe_path, data)
 
 
 def collect_project(source, resources_uploads, main_path: str) -> tuple[str, str, str, list[Asset]]:
     name = source.filename or ""
+    unpacked_total = 0
     if name.lower().endswith(".md"):
         markdown_text = _decode_markdown(source.read())
         markdown_name = PurePosixPath(name.replace("\\", "/")).name
@@ -183,6 +190,7 @@ def collect_project(source, resources_uploads, main_path: str) -> tuple[str, str
         project_assets: list[Asset] = []
     elif name.lower().endswith(".zip"):
         project_assets, markdown_files = _zip_assets(source, "project")
+        unpacked_total = sum(len(asset.data) for asset in project_assets) + sum(len(data) for _, data in markdown_files)
         if not markdown_files:
             raise ConversionError("В ZIP-архиве не найден Markdown-файл.")
         available = [path for path, _ in markdown_files]
@@ -207,7 +215,12 @@ def collect_project(source, resources_uploads, main_path: str) -> tuple[str, str
     resource_markdown: list[tuple[str, bytes]] = []
     for index, upload in enumerate(_as_upload_list(resources_uploads)):
         if upload.filename.lower().endswith(".zip"):
-            assets_from_zip, markdown_from_zip = _zip_assets(upload, f"resources:{index}", "assets")
+            assets_from_zip, markdown_from_zip = _zip_assets(
+                upload,
+                f"resources:{index}",
+                "assets",
+                MAX_ARCHIVE_UNPACKED - unpacked_total,
+            )
             unsupported = [
                 PurePosixPath(asset.archive_path).name
                 for asset in assets_from_zip
@@ -218,6 +231,7 @@ def collect_project(source, resources_uploads, main_path: str) -> tuple[str, str
                     "В ZIP-архиве ресурсов найдены неподдерживаемые файлы: " + ", ".join(unsupported) + ". Добавьте только изображения.",
                     "assets",
                 )
+            unpacked_total += sum(len(asset.data) for asset in assets_from_zip) + sum(len(data) for _, data in markdown_from_zip)
             resource_assets.extend(assets_from_zip)
             resource_markdown.extend(markdown_from_zip)
         else:
@@ -443,10 +457,10 @@ def _fetch_https_image(url: str) -> bytes:
                 raise ConversionError(f"Сервер изображения вернул код {response.status}.")
             content_length = response.getheader("Content-Length")
             if content_length and int(content_length) > MAX_IMAGE_BYTES:
-                raise ConversionError("Удалённое изображение превышает лимит 10 МБ.")
+                raise ConversionError("Удалённое изображение превышает лимит 30 МБ.")
             data = response.read(MAX_IMAGE_BYTES + 1)
             if len(data) > MAX_IMAGE_BYTES:
-                raise ConversionError("Удалённое изображение превышает лимит 10 МБ.")
+                raise ConversionError("Удалённое изображение превышает лимит 30 МБ.")
             return data
         except (OSError, http.client.HTTPException, UnicodeEncodeError, ValueError) as exc:
             if isinstance(exc, ConversionError):
@@ -462,7 +476,7 @@ def _fetch_https_image(url: str) -> bytes:
 
 def _sanitize_image(data: bytes, src: str) -> bytes:
     if len(data) > MAX_IMAGE_BYTES:
-        raise ConversionError(f"Изображение {src} превышает лимит 10 МБ.")
+        raise ConversionError(f"Изображение {src} превышает лимит 30 МБ.")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -477,7 +491,7 @@ def _sanitize_image(data: bytes, src: str) -> bytes:
                 image.save(output, format="PNG", optimize=True, dpi=dpi)
                 sanitized = output.getvalue()
                 if len(sanitized) > MAX_IMAGE_BYTES:
-                    raise ConversionError(f"Обработанное изображение {src} превышает лимит 10 МБ.")
+                    raise ConversionError(f"Обработанное изображение {src} превышает лимит 30 МБ.")
                 return sanitized
     except UnidentifiedImageError as exc:
         raise ConversionError(f"Файл по ссылке {src} не является поддерживаемым изображением.") from exc
@@ -531,7 +545,7 @@ def prepare_images(markdown: str, markdown_path: str, assets: list[Asset], choic
         sanitized = _sanitize_image(raw, src)
         total_bytes += len(sanitized)
         if total_bytes > MAX_TOTAL_IMAGE_BYTES:
-            raise ConversionError("Суммарный размер изображений превышает лимит 30 МБ.")
+            raise ConversionError("Суммарный размер обработанных изображений превышает лимит 200 МБ.")
         resolved[src] = sanitized
 
     if unresolved:

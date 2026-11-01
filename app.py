@@ -9,6 +9,7 @@ from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from converter import (
+    MAX_REQUEST_BYTES,
     ConversionError,
     SelectionRequired,
     build_docx,
@@ -17,12 +18,25 @@ from converter import (
 )
 from docx_profile import ProfileValidationError, default_profile, validate_profile
 
+MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+
 app = Flask(__name__)
 app.config.update(
-    MAX_CONTENT_LENGTH=50 * 1024 * 1024,
+    MAX_CONTENT_LENGTH=MAX_REQUEST_BYTES + MAX_MULTIPART_OVERHEAD_BYTES,
     MAX_FORM_MEMORY_SIZE=1024 * 1024,
     MAX_FORM_PARTS=1520,
 )
+
+
+def _total_uploaded_file_bytes(uploads) -> int:
+    total = 0
+    for upload in uploads:
+        stream = upload.stream
+        position = stream.tell()
+        stream.seek(0, io.SEEK_END)
+        total += stream.tell()
+        stream.seek(position)
+    return total
 
 
 @app.get("/")
@@ -42,6 +56,12 @@ def convert():
         return jsonify(error="Выберите Markdown-файл или ZIP-архив проекта.", field="source"), 400
 
     try:
+        resource_uploads = request.files.getlist("assets")
+        all_uploads = [upload for _, uploads in request.files.lists() for upload in uploads]
+        total_upload_bytes = _total_uploaded_file_bytes(all_uploads)
+        if total_upload_bytes > MAX_REQUEST_BYTES:
+            field = "assets" if resource_uploads else "source"
+            return jsonify(error="Общий размер загружаемых файлов не должен превышать 200 МБ.", field=field), 413
         try:
             asset_choices = json.loads(request.form.get("asset_choices", "{}"))
         except json.JSONDecodeError as exc:
@@ -69,7 +89,7 @@ def convert():
 
         markdown_text, markdown_name, markdown_path, assets = collect_project(
             source,
-            request.files.getlist("assets"),
+            resource_uploads,
             request.form.get("main_path", ""),
         )
         try:
@@ -94,7 +114,7 @@ def convert():
     except (BadZipFile, UnicodeError, ValueError) as exc:
         return jsonify(error=str(exc), field="source"), 400
     except RequestEntityTooLarge:
-        return jsonify(error="Файлы слишком большие. Максимальный общий размер — 50 МБ."), 413
+        return jsonify(error="Файлы слишком большие. Максимальный общий размер — 200 МБ."), 413
 
     stem = PurePath(markdown_name).stem or "document"
     filename = f"{stem}-formatted.docx".replace("\r", "").replace("\n", "") or "document-formatted.docx"
@@ -112,7 +132,7 @@ def convert():
 
 @app.errorhandler(RequestEntityTooLarge)
 def too_large(_error):
-    return jsonify(error="Файлы слишком большие. Максимальный общий размер — 50 МБ.", field="source"), 413
+    return jsonify(error="Файлы слишком большие. Максимальный общий размер — 200 МБ.", field="source"), 413
 
 
 if __name__ == "__main__":
