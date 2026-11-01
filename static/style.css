@@ -250,8 +250,33 @@ input[aria-invalid="true"], select[aria-invalid="true"] {
   line-height: 1.5;
 }
 
-.selected-file { overflow-wrap: anywhere; color: var(--ink); font-weight: 700; }
-.selected-file:empty { display: none; }
+.selected-file {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  border: 1px solid #b9cbb8;
+  border-radius: 5px;
+  padding: 9px 12px;
+  background: var(--success-bg);
+  color: var(--success);
+}
+.selected-file-check {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--success);
+  color: #fff;
+}
+.selected-file-check svg { display: block; width: 16px; height: 16px; }
+.selected-file-copy { display: grid; min-width: 0; gap: 1px; }
+.selected-file-status { font-size: 12px; line-height: 1.4; }
+.selected-file-name { overflow-wrap: anywhere; color: #3f5140; font-size: 12px; }
 .optional { display: inline; margin: 0 0 0 5px; font-weight: 400; }
 
 .assets-dropzone {

@@ -2,6 +2,7 @@ const form = document.querySelector("#convert-form");
 const sourceInput = document.querySelector("#source");
 const sourceDropzone = document.querySelector("#source-dropzone");
 const sourceName = document.querySelector("#source-name");
+const sourceFilename = document.querySelector("#source-filename");
 const sourceError = document.querySelector("#source-error");
 const assetsDropzone = document.querySelector("#assets-dropzone");
 const assetsError = document.querySelector("#assets-error");
@@ -441,7 +442,8 @@ function handleSourceFile(file) {
   invalidateResult("Исходный файл изменён. Преобразуйте документ ещё раз.");
   clearResolution();
   selectedSource = file;
-  sourceName.textContent = `Выбран файл: ${file.name}`;
+  sourceFilename.textContent = file.name;
+  sourceName.hidden = false;
   if (extension === ".md" && typeof imagesDialog.showModal === "function") imagesDialog.showModal();
 }
 
@@ -784,7 +786,8 @@ function resetForNewFile() {
   assetFilesInput.value = "";
   assetFolderInput.value = "";
   assetZipInput.value = "";
-  sourceName.textContent = "";
+  sourceFilename.textContent = "";
+  sourceName.hidden = true;
   renderAssetList();
   clearResolution();
   clearAllErrors();

@@ -42,7 +42,17 @@
             </span>
           </label>
           <p id="source-help" class="help">Markdown в кодировке UTF-8; максимум 5 МБ. ZIP-проект — до 50 МБ.</p>
-          <p id="source-name" class="selected-file" aria-live="polite"></p>
+          <div id="source-name" class="selected-file" role="status" aria-live="polite" aria-atomic="true" hidden>
+            <span class="selected-file-check" aria-hidden="true">
+              <svg viewBox="0 0 20 20" fill="none">
+                <path d="m4.5 10.2 3.6 3.6 7.4-7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="selected-file-copy">
+              <strong class="selected-file-status">Файл прикреплён и готов к преобразованию</strong>
+              <span id="source-filename" class="selected-file-name"></span>
+            </span>
+          </div>
           <p id="source-error" class="field-error" role="alert" hidden></p>
 
           <div id="markdown-choice" class="choice-panel" hidden>
