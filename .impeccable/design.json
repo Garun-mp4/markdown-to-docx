@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-02",
+  "title": "Design System: Markdown to DOCX",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "primary",
+        "displayName": "Чернила",
+        "canonical": "#201d1d",
+        "tonalRamp": ["#0f0000", "#201d1d", "#302c2c", "#424245"]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Тёплый холст",
+        "canonical": "#fdfcfc",
+        "tonalRamp": ["#ffffff", "#fdfcfc", "#f8f7f7", "#f1eeee"]
+      },
+      "tertiary": {
+        "role": "tertiary",
+        "displayName": "Синий действия",
+        "canonical": "#007aff",
+        "tonalRamp": ["#dcecff", "#007aff", "#0056b3", "#004085"]
+      },
+      "success": {
+        "role": "success",
+        "displayName": "Успех",
+        "canonical": "#1f6538",
+        "tonalRamp": ["#f0f7f1", "#a9c4ae", "#1f6538"]
+      },
+      "danger": {
+        "role": "error",
+        "displayName": "Ошибка",
+        "canonical": "#a50011",
+        "tonalRamp": ["#fff2f1", "#d99a9e", "#a50011"]
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "control-feedback",
+        "value": "140ms ease",
+        "purpose": "Short transitions for focus, hover and drag states."
+      }
+    ],
+    "breakpoints": [
+      { "name": "mobile", "value": "460px" },
+      { "name": "compact", "value": "700px" },
+      { "name": "tablet", "value": "880px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main conversion and confirmation action.",
+      "html": "<button class=\"ds-button-primary\" type=\"button\">Преобразовать в DOCX</button>",
+      "css": ".ds-button-primary { min-height: 42px; border: 1px solid #201d1d; border-radius: 4px; padding: 8px 15px; background: #201d1d; color: #fdfcfc; font: 500 13px/1.35 'Cascadia Code', Consolas, monospace; } .ds-button-primary:hover { background: #302c2c; } .ds-button-primary:focus-visible { outline: 2px solid #0056b3; outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Supporting actions for profile and resource handling.",
+      "html": "<button class=\"ds-button-secondary\" type=\"button\">Выбрать файл</button>",
+      "css": ".ds-button-secondary { min-height: 42px; border: 1px solid #646262; border-radius: 4px; padding: 8px 15px; background: #fdfcfc; color: #201d1d; font: 500 13px/1.35 'Cascadia Code', Consolas, monospace; } .ds-button-secondary:hover { background: #f8f7f7; border-color: #201d1d; } .ds-button-secondary:focus-visible { outline: 2px solid #0056b3; outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "text-input",
+      "description": "Profile and document controls share the same surface and boundary.",
+      "html": "<input class=\"ds-input\" type=\"text\" value=\"Название работы\" aria-label=\"Название работы\">",
+      "css": ".ds-input { width: 100%; min-height: 42px; border: 1px solid #646262; border-radius: 4px; padding: 8px 10px; background: #f8f7f7; color: #201d1d; font: 400 13px/1.4 'Cascadia Code', Consolas, monospace; } .ds-input:focus-visible { border-color: #0056b3; outline: 2px solid #0056b3; outline-offset: 2px; background: #fdfcfc; }"
+    },
+    {
+      "name": "Workflow Navigation",
+      "kind": "nav",
+      "refersTo": "workflow-link",
+      "description": "Links to the four actual stages of document preparation.",
+      "html": "<nav class=\"ds-workflow\"><a href=\"#source\">[01] Файл</a><a href=\"#resources\">[02] Ресурсы</a></nav>",
+      "css": ".ds-workflow { display: flex; overflow-x: auto; border-bottom: 1px solid rgba(15,0,0,.12); } .ds-workflow a { min-height: 48px; padding: 8px 16px; border-bottom: 2px solid transparent; color: #646262; font: 500 12px/1.55 'Cascadia Code', Consolas, monospace; text-decoration: none; } .ds-workflow a:hover, .ds-workflow a:focus-visible { border-bottom-color: #201d1d; color: #201d1d; }"
+    },
+    {
+      "name": "File Dropzone",
+      "kind": "custom",
+      "refersTo": "file-dropzone",
+      "description": "A square, dashed target with visible accepted file types.",
+      "html": "<div class=\"ds-dropzone\"><span>[FILE]</span><strong>Перетащите файл сюда</strong><small>.md, .zip</small></div>",
+      "css": ".ds-dropzone { display: grid; min-height: 148px; justify-items: center; align-content: center; gap: 8px; border: 1px dashed #646262; border-radius: 4px; padding: 18px; background: #f8f7f7; color: #201d1d; font: 400 14px/1.55 'Cascadia Code', Consolas, monospace; } .ds-dropzone:hover { border-color: #0056b3; background: #f2f7ff; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Текстовая рабочая консоль",
+    "overview": "A task-focused Markdown to DOCX workspace adapted from the user-provided OpenCode system. Warm cream, ink, monospaced type and hairline rules remain; marketing-only TUI imagery and wordmark are omitted.",
+    "keyCharacteristics": [
+      "One monospaced type family across the interface.",
+      "Warm cream canvas with near-black ink.",
+      "Real four-step document route using bracketed labels.",
+      "Flat surfaces and 4px interactive corners."
+    ],
+    "rules": [
+      {
+        "name": "One Type Rule",
+        "body": "Use the same monospaced font stack for headings, controls, status and body copy.",
+        "section": "typography"
+      },
+      {
+        "name": "Flat Surface Rule",
+        "body": "Use thin rules and tonal surfaces instead of shadows.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use accent blue only for links, focus and active guidance.",
+      "Do use semantic colors only for success, warning and error states."
+    ],
+    "donts": [
+      "Don't use a landing-page hero, decorative gradients or drop shadows.",
+      "Don't mix icon families or use serif display type."
+    ]
+  }
+}

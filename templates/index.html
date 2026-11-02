@@ -13,15 +13,27 @@
   <body>
     <main class="page">
       <header class="page-header">
-        <p class="eyebrow">Редактор академических документов</p>
-        <h1>Markdown <span aria-hidden="true">→</span> DOCX</h1>
+        <div class="page-header-title">
+          <h1>Markdown <span aria-hidden="true">→</span> DOCX</h1>
+          <span class="header-output" aria-label="Формат результата DOCX">
+            <span class="header-output-label">ФОРМАТ</span>
+            <strong>.DOCX</strong>
+          </span>
+        </div>
         <p class="intro">Загрузите текст и ресурсы, настройте оформление и получите редактируемый документ Word.</p>
       </header>
 
+      <nav class="workflow-nav" aria-label="Переход к этапу преобразования">
+        <a href="#source-section"><span class="workflow-step-number" aria-hidden="true">[01]</span>Файл</a>
+        <a href="#assets-section"><span class="workflow-step-number" aria-hidden="true">[02]</span>Ресурсы</a>
+        <a href="#headers-section"><span class="workflow-step-number" aria-hidden="true">[03]</span>Колонтитулы</a>
+        <a href="#profile-section"><span class="workflow-step-number" aria-hidden="true">[04]</span>Профиль</a>
+      </nav>
+
       <form id="convert-form" novalidate>
-        <section class="form-section" aria-labelledby="source-heading">
+        <section id="source-section" class="form-section" aria-labelledby="source-heading">
           <div class="section-heading">
-            <span class="section-number" aria-hidden="true">01</span>
+            <span class="section-number" aria-hidden="true">[01]</span>
             <div>
               <h2 id="source-heading">Исходный файл</h2>
               <p>Markdown-документ или ZIP-проект с сохранёнными папками.</p>
@@ -31,12 +43,7 @@
           <label id="source-dropzone" class="dropzone" for="source">
             <input id="source" name="source" type="file" accept=".md,.zip" required aria-describedby="source-help source-error">
             <span class="dropzone-content">
-              <span class="dropzone-mark" aria-hidden="true">
-                <svg viewBox="0 0 48 48" fill="none">
-                  <path d="M13 5.5h15l8 8V42.5H13V5.5Z" stroke="currentColor" stroke-width="1.8"/>
-                  <path d="M28 5.5v9h8M19 23h11M19 29h11M19 35h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                </svg>
-              </span>
+              <span class="dropzone-mark" aria-hidden="true">[FILE]</span>
               <span class="dropzone-title">Перетащите файл сюда</span>
               <span class="dropzone-caption">или выберите на устройстве · .md, .zip</span>
               <span class="dropzone-action" aria-hidden="true">Выбрать файл</span>
@@ -44,11 +51,7 @@
           </label>
           <p id="source-help" class="help">Markdown в кодировке UTF-8; максимум 5 МБ. Общий размер выбранных файлов — до 200 МБ.</p>
           <div id="source-name" class="selected-file" role="status" aria-live="polite" aria-atomic="true" hidden>
-            <span class="selected-file-check" aria-hidden="true">
-              <svg viewBox="0 0 20 20" fill="none">
-                <path d="m4.5 10.2 3.6 3.6 7.4-7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
+            <span class="selected-file-check" aria-hidden="true">[OK]</span>
             <span class="selected-file-copy">
               <strong class="selected-file-status">Файл прикреплён и готов к преобразованию</strong>
               <span id="source-filename" class="selected-file-name"></span>
@@ -64,7 +67,7 @@
 
         <section id="assets-section" class="form-section" aria-labelledby="assets-heading">
           <div class="section-heading">
-            <span class="section-number" aria-hidden="true">02</span>
+            <span class="section-number" aria-hidden="true">[02]</span>
             <div>
               <h2 id="assets-heading">Изображения <span class="optional">необязательно</span></h2>
               <p>Добавьте файлы или папку, если на них ссылается Markdown.</p>
@@ -72,13 +75,7 @@
           </div>
 
           <div id="assets-dropzone" class="assets-dropzone" role="group" aria-describedby="assets-help assets-error">
-            <span class="assets-icon" aria-hidden="true">
-              <svg viewBox="0 0 48 48" fill="none">
-                <path d="M8 14.5h12l3.5 4H40v21H8v-25Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                <path d="M13 34l7-7 5 5 4-4 7 6M30 14V6m0 0-4 4m4-4 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                <circle cx="31" cy="24" r="2" fill="currentColor"/>
-              </svg>
-            </span>
+            <span class="assets-icon" aria-hidden="true">[IMG]</span>
             <div class="assets-copy">
               <strong>Перетащите изображения или папку сюда</strong>
               <span>PNG, JPEG, GIF, BMP, TIFF, WEBP · до 30 МБ на изображение</span>
@@ -86,7 +83,7 @@
             <div class="assets-actions" aria-label="Способы добавить ресурсы">
               <button id="choose-assets" class="button button-secondary" type="button">Выбрать изображения</button>
               <button id="choose-folder" class="button button-secondary" type="button">Выбрать папку</button>
-              <button id="choose-assets-zip" class="button button-quiet" type="button">Добавить ZIP</button>
+              <button id="choose-assets-zip" class="button button-secondary" type="button">Добавить ZIP</button>
             </div>
           </div>
           <input id="asset-files" class="visually-hidden" type="file" accept=".png,.jpg,.jpeg,.gif,.bmp,.tif,.tiff,.webp" multiple tabindex="-1" aria-label="Выбрать изображения">
@@ -100,9 +97,9 @@
           <div id="resolution" class="resolution" aria-live="polite" hidden></div>
         </section>
 
-        <section class="form-section" aria-labelledby="headers-heading">
+        <section id="headers-section" class="form-section" aria-labelledby="headers-heading">
           <div class="section-heading">
-            <span class="section-number" aria-hidden="true">03</span>
+            <span class="section-number" aria-hidden="true">[03]</span>
             <div>
               <h2 id="headers-heading">Колонтитулы</h2>
               <p>Настройте верхнюю и нижнюю часть страницы в предпросмотре.</p>
@@ -171,9 +168,9 @@
           </div>
         </section>
 
-        <section class="form-section" aria-labelledby="profile-heading">
+        <section id="profile-section" class="form-section" aria-labelledby="profile-heading">
           <div class="section-heading">
-            <span class="section-number" aria-hidden="true">04</span>
+            <span class="section-number" aria-hidden="true">[04]</span>
             <div>
               <h2 id="profile-heading">Профиль оформления</h2>
               <p>Выберите готовые настройки или настройте собственный профиль.</p>
@@ -201,8 +198,10 @@
           </div>
         </section>
 
-        <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
-        <button id="convert-button" class="button button-primary submit-button" type="submit">Преобразовать в DOCX</button>
+        <div class="form-submit-row">
+          <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+          <button id="convert-button" class="button button-primary submit-button" type="submit">Преобразовать в DOCX</button>
+        </div>
       </form>
 
       <dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-dialog-title" aria-describedby="profile-dialog-description">
@@ -244,7 +243,6 @@
 
     <dialog id="images-dialog" class="images-dialog" aria-labelledby="images-dialog-title" aria-describedby="images-dialog-description">
       <form method="dialog">
-        <p class="eyebrow">Ресурсы Markdown</p>
         <h2 id="images-dialog-title">В документе есть изображения?</h2>
         <p id="images-dialog-description">Выберите папку с изображениями, чтобы приложение сопоставило её содержимое со ссылками в тексте. Отдельные файлы можно добавить здесь ниже или позже.</p>
         <div class="dialog-actions">

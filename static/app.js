@@ -670,7 +670,7 @@ function setFieldError(field, message) {
   target.hidden = false;
   if (field === "source") sourceDropzone.setAttribute("aria-invalid", "true");
   if (field === "assets") assetsDropzone.setAttribute("aria-invalid", "true");
-  setFeedback(message, "error");
+  setFeedback("");
 }
 
 function clearFieldError(field) {
@@ -1142,7 +1142,7 @@ form.addEventListener("submit", async (event) => {
     resultFilename.textContent = downloadLink.download;
     result.hidden = false;
     downloadLink.click();
-    setFeedback("DOCX готов. Файл скачан; его можно скачать ещё раз или начать новый документ.", "success");
+    setFeedback("");
     result.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
   } catch {
     setFeedback("Не удалось связаться с сервером. Проверьте соединение и повторите попытку.", "error");
